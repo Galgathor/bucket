@@ -1,0 +1,93 @@
+name: Test and publish
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://github.com/actions/checkout@v4
+      - uses: https://github.com/actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: System dependencies
+        run: |
+          if command -v sudo >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y pkg-config libssl-dev
+          else
+            apt-get update -qq
+            apt-get install -y pkg-config libssl-dev
+          fi
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Rust checks
+        run: |
+          cargo fmt --manifest-path backend/Cargo.toml --check
+          cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
+          cargo test --manifest-path backend/Cargo.toml --locked
+          cargo install cargo-audit --locked
+          cargo audit --file backend/Cargo.lock
+      - name: Frontend checks
+        working-directory: frontend
+        run: |
+          npm ci --no-fund --no-audit
+          npm audit --audit-level=high
+          npm test
+          npm run build
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+      - name: Check production image
+        run: |
+          docker build --tag bucket:check .
+          bash scripts/container-smoke.sh bucket:check
+
+  publish:
+    needs: test
+    if: gitea.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://github.com/actions/checkout@v4
+      - uses: https://github.com/docker/setup-buildx-action@v3
+      - uses: https://github.com/docker/login-action@v3
+        with:
+          registry: ${{ secrets.CONTAINER_REGISTRY }}
+          username: ${{ secrets.PACKAGES_USERNAME }}
+          password: ${{ secrets.PACKAGES_TOKEN }}
+      - name: Image names
+        id: image
+        env:
+          REGISTRY: ${{ secrets.CONTAINER_REGISTRY }}
+          REPOSITORY: ${{ gitea.repository }}
+          COMMIT: ${{ gitea.sha }}
+          REF: ${{ gitea.ref }}
+          DEFAULT_BRANCH: ${{ gitea.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${REGISTRY%/}/${REPOSITORY,,}"
+          tags="${image}:sha-${COMMIT}"
+          if [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+            tags="${tags},${image}:latest"
+          fi
+          if [[ "$REF" == refs/tags/v* ]]; then
+            version="${REF#refs/tags/}"
+            if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9.-]+)?$ ]]; then
+              tags="${tags},${image}:${version}"
+            fi
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "cache=${image}:buildcache" >> "$GITHUB_OUTPUT"
+      - name: Build and publish
+        uses: https://github.com/docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.cache }}
+          cache-to: type=registry,ref=${{ steps.image.outputs.cache }},mode=max
+          provenance: false

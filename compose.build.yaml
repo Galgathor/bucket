@@ -1,0 +1,4 @@
+services:
+  bucket:
+    image: bucket:local
+    build: .
