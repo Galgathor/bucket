@@ -95,7 +95,7 @@ Health is available at `/api/health`. It checks the application database without
 
 Authentication limits persist in SQLite (10 attempts per account / 15 minutes, 100 per connecting peer / 15 minutes). Bucket ignores untrusted forwarded IP headers; behind a proxy the peer limit is shared. Apply per-client sign-in limits at the reverse proxy if needed. Production cookies are Secure, HttpOnly, SameSite=Strict with a `__Host-` prefix, absolute expiry, and session-bound CSRF tokens. Mutations also require the exact configured Origin.
 
-## Gitea Actions and images
+## Gitea Actions and container registries
 
 `.gitea/workflows/build.yaml` runs Rust formatting, Clippy, security/operation integration tests, frontend tests/build, desktop/mobile browser tests and a production container build. A separate publication job depends on all checks passing. Pull requests never publish.
 
@@ -105,9 +105,16 @@ Configure the existing secrets exactly as named:
 | --- | --- |
 | `CONTAINER_REGISTRY` | Registry hostname, optionally with a port; a root HTTP(S) URL is also accepted. Owner paths are rejected. |
 | `PACKAGES_USERNAME` | Gitea registry login with permission to publish to the repository owner |
-| `PACKAGES_TOKEN` | Package write token |
+| `PACKAGES_TOKEN` | Gitea package write token |
+| `GHCR_USERNAME` | GitHub account username; also used as the GHCR image namespace |
+| `GHCR_TOKEN` | GitHub personal access token (classic) with `write:packages`; authorize organization SSO if required |
 
 Images use Gitea’s `{registry}/{owner}/{image}` convention; owner and repository names are lowercased. For this repository: `${CONTAINER_REGISTRY}/galgathor/bucket`. Every successful push gets `sha-<full commit>`. The default branch also gets `latest`. Valid `v1.2.3` release tags get a matching image tag. Prefer immutable commit tags for controlled deployments.
+
+The same build is also published to `ghcr.io/<lowercase-GHCR_USERNAME>/bucket`, with the same commit, default-branch `latest`, and release tags. Both registry logins must succeed before the shared Buildx publication step runs; it builds once and pushes both tag sets. There is no atomic transaction across registries, so a network failure can leave one published before the job fails. Registry build caching remains in Gitea.
+
+GHCR publication runs from Gitea using the explicit `GHCR_USERNAME` and `GHCR_TOKEN` secrets, not Gitea’s job token. The GitHub account must be able to write the target package. New GHCR packages are private by default: change package visibility in GitHub if you want anonymous public pulls. See [GitHub’s Container registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry). Set `BUCKET_IMAGE=ghcr.io/<github-username>/bucket:latest` to deploy from GHCR; authenticate with `docker login ghcr.io` for private packages. These publishing credentials belong in Actions secrets, not Bucket’s runtime `.env`.
+
 
 The `ubuntu-latest` label is a **Gitea runner label**, not a dependency on GitHub-hosted machines. Map it to a Linux runner with Git, Node 20+ for JavaScript actions, Bash, a Docker CLI and a working Docker daemon/socket. A common act_runner image is `catthehacker/ubuntu:act-22.04`. The runner must be allowed to install build/browser packages and reach GitHub action sources, crates.io, npm, Docker Hub and your registry. Buildx uses registry caching; no GitHub cache service is required. Enable Actions on the repository. Configure the runner label/network/socket on your Gitea installation if its defaults differ.
 

@@ -33,10 +33,25 @@ export function imageNames({ REGISTRY, REPOSITORY = '', COMMIT = '', REF = '', D
   return { registry, tags: tags.join(','), cache: `${image}:buildcache` };
 }
 
+export function publicationNames(env) {
+  const gitea = imageNames(env);
+  const username = (env.GHCR_USERNAME ?? '').trim().toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(username)) {
+    throw new Error('GHCR_USERNAME must be a valid GitHub account username for container publication.');
+  }
+  const repository = `${username}/${env.REPOSITORY.split('/')[1]}`;
+  const ghcr = imageNames({ ...env, REGISTRY: 'ghcr.io', REPOSITORY: repository });
+  return {
+    ...gitea,
+    tags: [...new Set([...gitea.tags.split(','), ...ghcr.tags.split(',')])].join(','),
+    ghcr_username: username,
+  };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     if (!process.env.GITHUB_OUTPUT) throw new Error('The Actions output file is unavailable.');
-    const outputs = imageNames(process.env);
+    const outputs = publicationNames(process.env);
     appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(outputs).map(([key, value]) => `${key}=${value}\n`).join(''));
   } catch (error) {
     // Never include the supplied registry value, credentials, or raw parser errors.

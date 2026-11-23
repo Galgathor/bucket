@@ -58,6 +58,7 @@ jobs:
         id: image
         env:
           REGISTRY: ${{ secrets.CONTAINER_REGISTRY }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
           REPOSITORY: ${{ gitea.repository }}
           COMMIT: ${{ gitea.sha }}
           REF: ${{ gitea.ref }}
@@ -68,7 +69,13 @@ jobs:
           registry: ${{ steps.image.outputs.registry }}
           username: ${{ secrets.PACKAGES_USERNAME }}
           password: ${{ secrets.PACKAGES_TOKEN }}
-      - name: Build and publish
+      - name: Log in to GHCR
+        uses: https://github.com/docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ steps.image.outputs.ghcr_username }}
+          password: ${{ secrets.GHCR_TOKEN }}
+      - name: Build and publish to Gitea and GHCR
         uses: https://github.com/docker/build-push-action@v6
         with:
           context: .

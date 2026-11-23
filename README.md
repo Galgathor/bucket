@@ -84,7 +84,7 @@ Build and run locally using Compose:
 docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
 
-Prefer a published image? Set `BUCKET_IMAGE` in `.env` to the image from your Gitea Packages registry, sign in to that registry if required, then use:
+Prefer a published image? Set `BUCKET_IMAGE` in `.env` to the image from your Gitea Packages registry or GHCR (`ghcr.io/<github-username>/bucket:latest`), sign in to that registry if required, then use:
 
 ```sh
 docker compose pull
