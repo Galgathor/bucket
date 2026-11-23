@@ -35,6 +35,7 @@ jobs:
       - name: Frontend checks
         working-directory: frontend
         run: |
+          node --test ../scripts/image-names.test.mjs
           npm ci --no-fund --no-audit
           npm audit --audit-level=high
           npm test
@@ -53,11 +54,6 @@ jobs:
     steps:
       - uses: https://github.com/actions/checkout@v4
       - uses: https://github.com/docker/setup-buildx-action@v3
-      - uses: https://github.com/docker/login-action@v3
-        with:
-          registry: ${{ secrets.CONTAINER_REGISTRY }}
-          username: ${{ secrets.PACKAGES_USERNAME }}
-          password: ${{ secrets.PACKAGES_TOKEN }}
       - name: Image names
         id: image
         env:
@@ -66,22 +62,12 @@ jobs:
           COMMIT: ${{ gitea.sha }}
           REF: ${{ gitea.ref }}
           DEFAULT_BRANCH: ${{ gitea.event.repository.default_branch }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          image="${REGISTRY%/}/${REPOSITORY,,}"
-          tags="${image}:sha-${COMMIT}"
-          if [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
-            tags="${tags},${image}:latest"
-          fi
-          if [[ "$REF" == refs/tags/v* ]]; then
-            version="${REF#refs/tags/}"
-            if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9.-]+)?$ ]]; then
-              tags="${tags},${image}:${version}"
-            fi
-          fi
-          echo "tags=$tags" >> "$GITHUB_OUTPUT"
-          echo "cache=${image}:buildcache" >> "$GITHUB_OUTPUT"
+        run: node scripts/image-names.mjs
+      - uses: https://github.com/docker/login-action@v3
+        with:
+          registry: ${{ steps.image.outputs.registry }}
+          username: ${{ secrets.PACKAGES_USERNAME }}
+          password: ${{ secrets.PACKAGES_TOKEN }}
       - name: Build and publish
         uses: https://github.com/docker/build-push-action@v6
         with:

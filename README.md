@@ -105,7 +105,7 @@ Configure the existing secrets exactly as named:
 
 | Secret | Value |
 | --- | --- |
-| `CONTAINER_REGISTRY` | Registry hostname, optionally with a port; **no scheme or owner path** |
+| `CONTAINER_REGISTRY` | Registry hostname, optionally with a port; a root HTTP(S) URL is also accepted. Owner paths are rejected. |
 | `PACKAGES_USERNAME` | Gitea registry login with permission to publish to the repository owner |
 | `PACKAGES_TOKEN` | Package write token |
 
