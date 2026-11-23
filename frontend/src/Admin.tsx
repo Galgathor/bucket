@@ -678,6 +678,15 @@ function ConfirmAction({
 }
 const actionNames: Record<string, string> = {
   login: "Signed in",
+  "login.access_denied": "Sign-in blocked: Bucket access not enabled",
+  "login.mailbox_missing": "Sign-in blocked: mailbox not found",
+  "login.mailbox_disabled": "Sign-in blocked: mailbox turned off",
+  "login.mailbox_mismatch": "Sign-in blocked: unexpected mailbox",
+  "login.unsupported_identity": "Sign-in blocked: external identity provider",
+  "login.identity_changed": "Sign-in blocked: mailbox identity changed",
+  "login.identity_missing": "Sign-in blocked: mailbox identity unavailable",
+  "login.access_changed": "Sign-in blocked: access changed",
+  "login.credentials_rejected": "Sign-in rejected by mail server",
   create: "Created address",
   "create.started": "Creating address",
   "create.failed": "Creation needs review",

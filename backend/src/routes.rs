@@ -180,61 +180,103 @@ async fn login(
     let account = app
         .db
         .limit(&format!("email:{}", hash(&normalized)), 10, 900)?;
-    if !ip || !account {
+    if !account {
         return Err(Error::new(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many sign-in attempts. Try again in 15 minutes.",
         ));
     }
-    let denied = || {
-        Error::new(
-            StatusCode::UNAUTHORIZED,
-            "Sign-in failed. Check your email, password, and access to Bucket.",
-        )
+    let denied = |reason: &str, message: &str| {
+        tracing::warn!(account=%normalized,reason,"sign-in rejected");
+        if app
+            .db
+            .audit(&normalized, &format!("login.{reason}"), "", "failed")
+            .is_err()
+        {
+            tracing::error!("could not record failed sign-in");
+        }
+        Error::new(StatusCode::UNAUTHORIZED, message)
     };
     if input.password.is_empty() || input.password.len() > 1024 {
-        return Err(denied());
+        return Err(denied(
+            "credentials_rejected",
+            "The mail server did not accept this email and password. Use your full mailbox email address and an IMAP-enabled password.",
+        ));
     }
     let user = app
         .db
         .user(&normalized)?
         .filter(|u| u.enabled)
-        .ok_or_else(denied)?;
+        .ok_or_else(||denied("access_denied","This account does not have access to Bucket. Ask an administrator to enable it under People."))?;
     let mailbox = app
         .mailcow
         .get(&Kind::Mailbox, &normalized)
-        .await?
-        .ok_or_else(denied)?;
-    if active(&mailbox) != 1
-        || mailbox["username"] != normalized
-        || mailbox.get("authsource").is_some_and(|v| v != "mailcow")
-    {
-        return Err(denied());
+        .await.map_err(|_| {
+            tracing::warn!(account=%normalized,reason="api_unavailable","sign-in could not check mailbox");
+            Error::new(StatusCode::SERVICE_UNAVAILABLE,"Bucket could not check your account with Mailcow. Ask the administrator to check the API connection, key permissions, and allowed IP addresses.")
+        })?
+        .ok_or_else(||denied("mailbox_missing","This email address is not a mailbox on the connected mail server. Use a full mailbox address, not an alias or the Mailcow web administrator username."))?;
+    if mailbox["username"] != normalized {
+        return Err(denied(
+            "mailbox_mismatch",
+            "The mail server returned a different mailbox. Ask the administrator to check the Mailcow connection.",
+        ));
+    }
+    if active(&mailbox) != 1 {
+        return Err(denied(
+            "mailbox_disabled",
+            "This mailbox is turned off or cannot sign in. Ask your mail administrator to enable it.",
+        ));
+    }
+    if mailbox.get("authsource").is_some_and(|v| v != "mailcow") {
+        return Err(denied(
+            "unsupported_identity",
+            "This mailbox uses an external sign-in provider. Bucket currently supports locally authenticated Mailcow mailboxes only.",
+        ));
     }
     if app
         .db
         .user_identity(&normalized)?
         .is_some_and(|id| id != mailcow::identity(&mailbox))
     {
-        return Err(denied());
+        return Err(denied(
+            "identity_changed",
+            "This mailbox has changed since access was approved. Ask an administrator to save its access again under People.",
+        ));
+    }
+    if mailcow::identity(&mailbox).is_empty() {
+        return Err(denied(
+            "identity_missing",
+            "The mail server did not return a mailbox creation identity. Ask your administrator to check that the Mailcow version is supported.",
+        ));
     }
     if !app
         .auth
         .authenticate(normalized.clone(), input.password)
         .await?
     {
-        app.db.audit(&normalized, "login", "", "failed")?;
-        return Err(denied());
+        return Err(denied(
+            "credentials_rejected",
+            "The mail server did not accept this email and password. Use your full mailbox email address and an IMAP-enabled password. If you use two-step verification, check whether your mail server requires an app password.",
+        ));
     }
     let _guard = app.writes.lock().await;
     if !app.db.user(&normalized)?.is_some_and(|u| u.enabled) {
-        return Err(denied());
+        return Err(denied(
+            "access_changed",
+            "Your access changed during sign-in. Ask an administrator to check your access under People.",
+        ));
     }
     let current = app
         .mailcow
         .get(&Kind::Mailbox, &normalized)
         .await?
-        .ok_or_else(denied)?;
+        .ok_or_else(|| {
+            denied(
+                "mailbox_missing",
+                "This mailbox was removed during sign-in. Contact your mail administrator.",
+            )
+        })?;
     if active(&current) != 1
         || mailcow::identity(&current) != mailcow::identity(&mailbox)
         || app
@@ -242,15 +284,15 @@ async fn login(
             .user_identity(&normalized)?
             .is_some_and(|id| id != mailcow::identity(&current))
     {
-        return Err(denied());
+        return Err(denied(
+            "identity_changed",
+            "This mailbox changed during sign-in. Ask an administrator to check its access under People.",
+        ));
     }
     app.db
         .bind_identity(&normalized, &mailcow::identity(&mailbox))?;
     if let Some(old) = session_cookie(&app, &headers) {
         app.db.delete_session(&hash(&old))?;
-    }
-    if mailcow::identity(&mailbox).is_empty() {
-        return Err(denied());
     }
     let value = token();
     let session = Session {

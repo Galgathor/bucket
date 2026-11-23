@@ -185,6 +185,11 @@ impl Authenticator for ImapAuth {
     }
 }
 
+fn imap_failure(reason: &str, message: &str) -> Error {
+    tracing::warn!(reason, "IMAP sign-in failed");
+    Error::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, message)
+}
+
 fn imap_login(
     config: &Config,
     tls: &native_tls::TlsConnector,
@@ -194,7 +199,7 @@ fn imap_login(
     use std::net::{TcpStream, ToSocketAddrs};
     let addresses: Vec<_> = (config.imap_host.as_str(), config.imap_port)
         .to_socket_addrs()
-        .map_err(|_| Error::upstream(false))?
+        .map_err(|_| imap_failure("dns_failed","Bucket could not find the mail server. Ask the administrator to check BUCKET_IMAP_HOST."))?
         .collect();
     let mut connected = None;
     for addr in addresses.into_iter().take(4) {
@@ -203,7 +208,7 @@ fn imap_login(
             break;
         }
     }
-    let stream = connected.ok_or_else(|| Error::upstream(false))?;
+    let stream = connected.ok_or_else(|| imap_failure("connection_failed","Bucket could not connect to the mail server. Ask the administrator to check the IMAP hostname, port, and firewall."))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .map_err(|_| Error::internal())?;
@@ -212,16 +217,19 @@ fn imap_login(
         .map_err(|_| Error::internal())?;
     let stream = tls
         .connect(&config.imap_host, stream)
-        .map_err(|_| Error::upstream(false))?;
+        .map_err(|_| imap_failure("tls_failed","Bucket could not establish a secure connection to the mail server. Ask the administrator to check the IMAP hostname and TLS certificate."))?;
     let mut client = imap::Client::new(stream);
-    client.read_greeting().map_err(|_| Error::upstream(false))?;
+    client.read_greeting().map_err(|_| imap_failure("greeting_failed","The mail server did not send a valid IMAP greeting. Ask the administrator to check the IMAP port and service."))?;
     match client.login(email, password) {
         Ok(mut session) => {
             let _ = session.logout();
             Ok(true)
         }
         Err((imap::error::Error::No(_), _)) | Err((imap::error::Error::Bad(_), _)) => Ok(false),
-        Err(_) => Err(Error::upstream(false)),
+        Err(_) => Err(imap_failure(
+            "protocol_failed",
+            "The mail server interrupted sign-in. Try again or ask the administrator to check the IMAP service.",
+        )),
     }
 }
 #[cfg(test)]

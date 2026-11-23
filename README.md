@@ -133,3 +133,11 @@ To run locally, export the essential `BUCKET_*` variables, use `BUCKET_PUBLIC_UR
 Backend tests run against an HTTP Mailcow contract fixture, with separate real-TLS IMAP acceptance, rejection and untrusted-certificate tests. Browser tests use intercepted API fixtures. There is no production mock mode or authentication bypass. A live deployment still needs verification against your actual Mailcow version, credentials, certificates and API allowlist.
 
 See [Mailcow API contract](docs/mailcow-api.md) for upstream references and integration details.
+
+## Troubleshooting sign-in
+
+Use the **full mailbox email address**, not an alias or the Mailcow web administrator username. The initial administrator must match `BUCKET_ADMIN_EMAIL`; other accounts must be enabled under **Settings → People**. Correct mailbox credentials alone do not grant Bucket access.
+
+Sign-in errors distinguish Bucket access, missing/disabled mailboxes, external identity providers, mailbox replacement, IMAP credential rejection, and API/IMAP connection failures. With two-step verification, use an IMAP-enabled app password if required by your Mailcow policy; Bucket cannot accept an interactive one-time code.
+
+For deployment diagnostics, retry once and inspect `docker compose logs --since=5m bucket`. Failed account checks log a safe `reason` such as `access_denied`, `unsupported_identity`, or `identity_changed`; IMAP connection failures report `dns_failed`, `connection_failed`, `tls_failed`, `greeting_failed`, or `protocol_failed`. Passwords, API keys, and raw server responses are never included. Account rejection reasons also appear under **Settings → Activity**. Treat logs as private because they include email addresses.

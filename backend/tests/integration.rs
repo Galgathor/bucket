@@ -818,3 +818,92 @@ async fn replacement_login_mailbox_requires_explicit_reapproval() {
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn sign_in_explains_account_access_and_mailbox_rejections_without_secrets() {
+    let f = Fixture::new().await;
+    let input = |email: &str| json!({"email":email,"password":"must-not-be-logged-123!"});
+    let (status, value, _) = f
+        .call(
+            "POST",
+            "/api/login",
+            None,
+            Some(input("unknown@example.com")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not have access to Bucket")
+    );
+    f.mock
+        .0
+        .lock()
+        .unwrap()
+        .mailboxes
+        .get_mut("alice@example.com")
+        .unwrap()["active"] = json!(0);
+    let (_, value, _) = f
+        .call("POST", "/api/login", None, Some(input("alice@example.com")))
+        .await;
+    assert!(value["error"].as_str().unwrap().contains("turned off"));
+    f.mock
+        .0
+        .lock()
+        .unwrap()
+        .mailboxes
+        .get_mut("alice@example.com")
+        .unwrap()["active"] = json!(1);
+    f.mock
+        .0
+        .lock()
+        .unwrap()
+        .mailboxes
+        .get_mut("alice@example.com")
+        .unwrap()["authsource"] = json!("ldap");
+    let (_, value, _) = f
+        .call("POST", "/api/login", None, Some(input("alice@example.com")))
+        .await;
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap()
+            .contains("external sign-in provider")
+    );
+    f.mock
+        .0
+        .lock()
+        .unwrap()
+        .mailboxes
+        .remove("alice@example.com");
+    let (_, value, _) = f
+        .call("POST", "/api/login", None, Some(input("alice@example.com")))
+        .await;
+    assert!(value["error"].as_str().unwrap().contains("not a mailbox"));
+    assert_eq!(f.auth.calls.load(Ordering::SeqCst), 0);
+    let audit = serde_json::to_string(&f.app.db.audits().unwrap()).unwrap();
+    assert!(audit.contains("login.access_denied"));
+    assert!(audit.contains("login.mailbox_disabled"));
+    assert!(!audit.contains("must-not-be-logged"));
+}
+
+#[tokio::test]
+async fn sign_in_explains_imap_rejection_and_api_unavailability() {
+    let mut f = Fixture::new().await;
+    f.app.auth = Arc::new(FakeAuth {
+        okay: false,
+        calls: AtomicUsize::new(0),
+    });
+    let input = json!({"email":"alice@example.com","password":"test-only-password"});
+    let (status, value, _) = f
+        .call("POST", "/api/login", None, Some(input.clone()))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(value["error"].as_str().unwrap().contains("did not accept"));
+    f.server.abort();
+    let (status, value, _) = f.call("POST", "/api/login", None, Some(input)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(value["error"].as_str().unwrap().contains("API connection"));
+}
