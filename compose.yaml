@@ -1,6 +1,6 @@
 services:
   bucket:
-    image: ${BUCKET_IMAGE:-ghcr.io/galgathor/bucket:latest}
+    image: ghcr.io/galgathor/bucket:latest
     restart: unless-stopped
     init: true
     stop_grace_period: 45s

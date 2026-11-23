@@ -84,7 +84,7 @@ Build and run locally using Compose:
 docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
 
-Prefer a published image? Compose defaults to `ghcr.io/galgathor/bucket:latest`. Override `BUCKET_IMAGE` in `.env` to use another registry or a pinned version. Sign in with `docker login ghcr.io` if the package is private, then use:
+Prefer a published image? Compose uses `ghcr.io/galgathor/bucket:latest` directly. To pin a version, change the `image` field in `compose.yaml`. Sign in with `docker login ghcr.io` if the package is private, then use:
 
 ```sh
 docker compose pull

@@ -6,7 +6,6 @@ Detailed setup, maintenance, development, and troubleshooting notes. Run command
 
 1. In Mailcow, create a **read-write administrator API key** under **System → Configuration → Access → Administrators → API**. Restrict it to the public outbound IP of the Bucket server. Bucket and Mailcow do not need a shared Docker network.
 2. Copy `.env.example` to `.env` and set:
-   - `BUCKET_IMAGE`: defaults to `ghcr.io/galgathor/bucket:latest`; override it for another registry or a pinned version.
    - `BUCKET_PUBLIC_URL`: Bucket’s external HTTPS origin.
    - `BUCKET_MAILCOW_URL` and `BUCKET_MAILCOW_API_KEY`.
    - `BUCKET_IMAP_HOST`: Mailcow’s certificate-valid IMAP hostname (implicit TLS, port 993 by default).
@@ -113,7 +112,7 @@ Images use Gitea’s `{registry}/{owner}/{image}` convention; owner and reposito
 
 The same build is also published to `ghcr.io/<lowercase-GHCR_USERNAME>/bucket`, with the same commit, default-branch `latest`, and release tags. Both registry logins must succeed before the shared Buildx publication step runs; it builds once and pushes both tag sets. There is no atomic transaction across registries, so a network failure can leave one published before the job fails. Registry build caching remains in Gitea.
 
-GHCR publication runs from Gitea using the explicit `GHCR_USERNAME` and `GHCR_TOKEN` secrets, not Gitea’s job token. The GitHub account must be able to write the target package. New GHCR packages are private by default: change package visibility in GitHub if you want anonymous public pulls. See [GitHub’s Container registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry). Set `BUCKET_IMAGE=ghcr.io/<github-username>/bucket:latest` to deploy from GHCR; authenticate with `docker login ghcr.io` for private packages. These publishing credentials belong in Actions secrets, not Bucket’s runtime `.env`.
+GHCR publication runs from Gitea using the explicit `GHCR_USERNAME` and `GHCR_TOKEN` secrets, not Gitea’s job token. The GitHub account must be able to write the target package. New GHCR packages are private by default: change package visibility in GitHub if you want anonymous public pulls. See [GitHub’s Container registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry). Compose uses `ghcr.io/galgathor/bucket:latest` directly. Edit the `image` field in `compose.yaml` to select another registry or pin a version; authenticate with `docker login ghcr.io` for private packages. These publishing credentials belong in Actions secrets, not Bucket’s runtime `.env`.
 
 
 The `ubuntu-latest` label is a **Gitea runner label**, not a dependency on GitHub-hosted machines. Map it to a Linux runner with Git, Node 20+ for JavaScript actions, Bash, a Docker CLI and a working Docker daemon/socket. A common act_runner image is `catthehacker/ubuntu:act-22.04`. The runner must be allowed to install build/browser packages and reach GitHub action sources, crates.io, npm, Docker Hub and your registry. Buildx uses registry caching; no GitHub cache service is required. Enable Actions on the repository. Configure the runner label/network/socket on your Gitea installation if its defaults differ.
