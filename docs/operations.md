@@ -148,6 +148,8 @@ For deployment diagnostics, retry once and inspect `docker compose logs --since=
 
 ## Inbox
 
+Common verification codes in message subjects, plain text, and HTML are shown above the message with a **Copy code** button. Detection uses nearby code labels and ignores common phone, date, and order-number patterns; unusual formats or languages may require manual copying. Codes are detected locally in the browser, are never saved by Bucket, and reach the clipboard only when clicked. If clipboard access is blocked, the code remains selectable. See the [desktop](screenshots/verification-code.png) and [mobile](screenshots/verification-code-mobile.png) examples.
+
 Open **Inbox** and choose a mailbox or alias from the address switcher. Browse Inbox, Spam, Trash, and Sent; read messages and attachments; mark messages read or unread; compose plain-text messages and reply. Spam and Trash actions move messages and can be reversed with **Move to inbox**. There is no permanent deletion. Moves require server support for IMAP MOVE; Bucket never globally expunges a mailbox. Folder names are discovered through IMAP special-use flags, with common-name fallbacks.
 
 Your primary mailbox opens during a new sign-in. Independent mailboxes require their own mailbox password or IMAP-enabled app password when first opened. Aliases share the connection to their authorized destination mailbox. Only your primary mailbox and addresses you own in Bucket are available; administrator status does not grant access to other users’ messages.

@@ -870,3 +870,149 @@ test("uncertain delivery prevents an accidental resend", async ({ page }) => {
   await expect(page.getByRole("alert")).toContainText("confirm delivery");
   expect(attempts).toBe(1);
 });
+
+test("copy verification codes from text and HTML without carrying copied state between addresses", async ({
+  page,
+}, info) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (value: string) => {
+          (window as unknown as { copiedCode: string }).copiedCode = value;
+        },
+      },
+    });
+  });
+  await setup(page);
+  await page.route("**/api/mail/message?**", (route) => {
+    const alias =
+      new URL(route.request().url()).searchParams.get("address") ===
+      "shopping@example.com";
+    return route.fulfill({
+      json: {
+        message: {
+          uid: alias ? 102 : 101,
+          subject: "Your verification code",
+          from: "sender@example.net",
+          to: alias ? "shopping@example.com" : "alex@example.com",
+          date: "",
+          read: true,
+          size: 100,
+        },
+        text: alias
+          ? ""
+          : "Your verification code is 012345. Do not share it. Call 5551234 for help.",
+        html: alias
+          ? '<style>.content{color:#123456}</style><p>Your verification code:</p><div><strong>012345</strong></div><p>Order 987654</p><a href="https://example.net/123456">Help</a>'
+          : "",
+        attachments: [],
+      },
+    });
+  });
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Unread: Hello Alex", exact: true })
+    .click();
+  const copy = page.getByRole("button", {
+    name: "Copy code 012345",
+    exact: true,
+  });
+  await expect(copy).toHaveText("Copy code");
+  await expect(
+    page.getByRole("group", { name: "Verification codes" }).getByRole("button"),
+  ).toHaveCount(1);
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { copiedCode?: string }).copiedCode,
+    ),
+  ).toBeUndefined();
+  await copy.click();
+  await expect(copy).toHaveText("Copied");
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { copiedCode: string }).copiedCode,
+    ),
+  ).toBe("012345");
+  const { default: AxeBuilder } = await import("@axe-core/playwright");
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
+  await page
+    .getByRole("combobox", { name: "Email address", exact: true })
+    .selectOption("shopping@example.com");
+  await page
+    .getByRole("button", { name: "Unread: Your receipt", exact: true })
+    .click();
+  await expect(copy).toHaveText("Copy code");
+  await expect(
+    page.getByRole("group", { name: "Verification codes" }).getByRole("button"),
+  ).toHaveCount(1);
+  await copy.click();
+  await expect(copy).toHaveText("Copied");
+  expect(
+    await page.evaluate(() =>
+      [...Object.values(localStorage), ...Object.values(sessionStorage)].some(
+        (value) => value.includes("012345"),
+      ),
+    ),
+  ).toBe(false);
+  await page.screenshot({
+    path: info.outputPath("verification-code.png"),
+    fullPage: true,
+  });
+});
+
+test("failed clipboard writes leave the detected code available to copy manually", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async () => {
+          throw new Error("Clipboard denied");
+        },
+      },
+    });
+  });
+  await setup(page);
+  await page.route("**/api/mail/message?**", (route) =>
+    route.fulfill({
+      json: {
+        message: {
+          uid: 101,
+          subject: "Sign in",
+          from: "sender@example.net",
+          to: "alex@example.com",
+          date: "",
+          read: true,
+          size: 100,
+        },
+        text: "Your one-time code is A7C9F2.",
+        html: "",
+        attachments: [],
+      },
+    }),
+  );
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Unread: Hello Alex", exact: true })
+    .click();
+  const copy = page.getByRole("button", {
+    name: "Copy code A7C9F2",
+    exact: true,
+  });
+  await copy.click();
+  await expect(copy).toHaveText("Copy code");
+  await expect(
+    page.getByText("Could not copy the code. Select it and copy it manually.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(page.locator(".verification-code code")).toHaveText("A7C9F2");
+});

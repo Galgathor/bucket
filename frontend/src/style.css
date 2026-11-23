@@ -2123,3 +2123,33 @@ textarea:disabled {
     min-width: 0;
   }
 }
+
+.verification-codes {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 22px;
+}
+.verification-code {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--accent-soft);
+}
+.verification-code > span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.verification-code code {
+  font-size: 1.1rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+.verification-code .button {
+  margin-left: auto;
+}

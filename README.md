@@ -40,7 +40,7 @@ Write a quick message from the selected address.
 
 - **Aliases for different parts of your life.** Forward to your primary mailbox or another mailbox you own. Rename, copy, turn off, or delete them when needed.
 - **Independent mailboxes.** Create an inbox with its own password, generate a strong password, and manage storage space.
-- **A lightweight inbox.** Read messages and attachments, write a quick reply, or compose a plain-text message. Move mail to Spam or Trash, restore it, and browse Sent. New mail refreshes every 30 seconds while Bucket is open, with unread badges for each address.
+- **A lightweight inbox.** Read messages and attachments, copy detected verification codes with one click, write a quick reply, or compose a plain-text message. Move mail to Spam or Trash, restore it, and browse Sent. New mail refreshes every 30 seconds while Bucket is open, with unread badges for each address.
 - **Simple administration.** Choose allowed domains, approve people, set limits, review ownership problems, and inspect activity. No public signup.
 - **A comfortable interface.** Light, dark, and system themes; desktop and mobile layouts; keyboard support; and an installable PWA.
 

@@ -16,6 +16,7 @@ import { api, ApiError, space, type Me } from "./api";
 import { Busy, ErrorMessage, InfoButton } from "./components";
 
 import { Compose, type Draft } from "./Compose";
+import { VerificationCodes } from "./VerificationCodes";
 import {
   MAIL_REFRESH_MS,
   type Folder,
@@ -609,6 +610,11 @@ export function Inbox({
                       </button>
                     </div>
                   </div>
+                  <VerificationCodes
+                    key={`${address}:${folder}:${validity}:${body.message.uid}`}
+                    message={body}
+                    notify={notify}
+                  />
                   {body.html ? (
                     <iframe
                       className="message-html"
