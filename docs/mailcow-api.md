@@ -39,3 +39,7 @@ Before using a production Mailcow server, the operator should verify sign-in wit
 ## Dependency notes
 
 The IMAP client is pinned to `imap` 3.0.0-alpha.15 to use the newer protocol parser and avoid the old parser’s unsound `lexical-core` dependency. Its TLS login behavior is covered by real-socket tests. The transitive `chrono` dependency currently has an upstream unmaintained advisory (RUSTSEC-2026-0543) with no fixed release; it is not used for Bucket sessions or authorization. The current Cargo audit reports no vulnerability advisories, with this maintenance warning remaining. Recheck advisories during updates.
+
+## Inbox transport
+
+The reader uses standard TLS IMAP `LOGIN`, `SELECT INBOX`, `UID SEARCH`, `UID FETCH` with `BODY.PEEK` and partial size limits, and `UID STORE` for the Seen flag. REST API calls still authorize every selected primary/owned mailbox or alias destination before an IMAP request. A UID is not accepted from another address view without checking recipient headers and UID validity. Message and attachment access never use the Mailcow administrator API key as an IMAP credential. Connections are session-bound; no mailbox password persistence or Mailcow master-user access is introduced.

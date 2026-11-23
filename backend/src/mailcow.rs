@@ -164,13 +164,25 @@ pub fn matches(row: &crate::model::Resource, v: &Value) -> bool {
     address == row.address && marker && row.identity.as_ref().is_none_or(|id| id == &identity(v))
 }
 
+pub type ImapSession = imap::Session<native_tls::TlsStream<std::net::TcpStream>>;
+
 #[async_trait::async_trait]
 pub trait Authenticator: Send + Sync {
     async fn authenticate(&self, email: String, password: String) -> Result<bool>;
+    async fn connect(&self, _email: String, _password: String) -> Result<Option<ImapSession>> {
+        Ok(None)
+    }
 }
 pub struct ImapAuth(pub Arc<Config>);
 #[async_trait::async_trait]
 impl Authenticator for ImapAuth {
+    async fn connect(&self, email: String, password: String) -> Result<Option<ImapSession>> {
+        let config = self.0.clone();
+        tokio::task::spawn_blocking(move|| {
+            let tls=native_tls::TlsConnector::builder().min_protocol_version(Some(native_tls::Protocol::Tlsv12)).build().map_err(|_|Error::internal())?;
+            imap_connect(&config,&tls,&email,&password)?.map(Some).ok_or_else(||Error::new(axum::http::StatusCode::UNAUTHORIZED,"The mail server did not accept this email and password. Use an IMAP-enabled password."))
+        }).await.map_err(|_|Error::internal())?
+    }
     async fn authenticate(&self, email: String, password: String) -> Result<bool> {
         let config = self.0.clone();
         tokio::task::spawn_blocking(move || {
@@ -196,6 +208,19 @@ fn imap_login(
     email: &str,
     password: &str,
 ) -> Result<bool> {
+    if let Some(mut session) = imap_connect(config, tls, email, password)? {
+        let _ = session.logout();
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+fn imap_connect(
+    config: &Config,
+    tls: &native_tls::TlsConnector,
+    email: &str,
+    password: &str,
+) -> Result<Option<ImapSession>> {
     use std::net::{TcpStream, ToSocketAddrs};
     let addresses: Vec<_> = (config.imap_host.as_str(), config.imap_port)
         .to_socket_addrs()
@@ -221,11 +246,8 @@ fn imap_login(
     let mut client = imap::Client::new(stream);
     client.read_greeting().map_err(|_| imap_failure("greeting_failed","The mail server did not send a valid IMAP greeting. Ask the administrator to check the IMAP port and service."))?;
     match client.login(email, password) {
-        Ok(mut session) => {
-            let _ = session.logout();
-            Ok(true)
-        }
-        Err((imap::error::Error::No(_), _)) | Err((imap::error::Error::Bad(_), _)) => Ok(false),
+        Ok(session) => Ok(Some(session)),
+        Err((imap::error::Error::No(_), _)) | Err((imap::error::Error::Bad(_), _)) => Ok(None),
         Err(_) => Err(imap_failure(
             "protocol_failed",
             "The mail server interrupted sign-in. Try again or ask the administrator to check the IMAP service.",

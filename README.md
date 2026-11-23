@@ -1,6 +1,6 @@
 # Bucket
 
-A self-hosted email address manager for an existing Mailcow server. Rust (Axum), React, and SQLite, served by one container.
+A self-hosted email address manager and lightweight inbox reader for an existing Mailcow server. Rust (Axum), React, and SQLite, served by one container.
 
 People sign in with their existing mailbox credentials, use **Create Mailbox** or **Create Alias**, and manage addresses they own. Alias creation starts with a name, suggests a matching address, and lets people choose a destination and optionally review before creating. The three-character random suffix preference is saved per person. Bucket includes light/dark/system themes, mobile layouts, installable PWA support, and a separate administrator interface.
 
@@ -141,3 +141,17 @@ Use the **full mailbox email address**, not an alias or the Mailcow web administ
 Sign-in errors distinguish Bucket access, missing/disabled mailboxes, external identity providers, mailbox replacement, IMAP credential rejection, and API/IMAP connection failures. With two-step verification, use an IMAP-enabled app password if required by your Mailcow policy; Bucket cannot accept an interactive one-time code.
 
 For deployment diagnostics, retry once and inspect `docker compose logs --since=5m bucket`. Failed account checks log a safe `reason` such as `access_denied`, `unsupported_identity`, or `identity_changed`; IMAP connection failures report `dns_failed`, `connection_failed`, `tls_failed`, `greeting_failed`, or `protocol_failed`. Passwords, API keys, and raw server responses are never included. Account rejection reasons also appear under **Settings → Activity**. Treat logs as private because they include email addresses.
+
+## Inbox
+
+Open **Inbox** and choose a mailbox or alias from the address switcher. This release supports inbox browsing, reading, downloading attachments, and marking messages read or unread. Composing, replying, deleting messages, and browsing other folders are not included.
+
+Your primary mailbox opens during a new sign-in. Independent mailboxes require their own mailbox password or IMAP-enabled app password when first opened. Aliases share the connection to their authorized destination mailbox. Only your primary mailbox and addresses you own in Bucket are available; administrator status does not grant access to other users’ messages.
+
+Bucket retains **authenticated IMAP sockets in memory**, not mailbox passwords, app passwords, or message copies in SQLite. Logout closes that session’s connections; expired/revoked sessions are swept every minute. Restarting Bucket or an idle connection being closed by Mailcow means the mailbox must be opened again. Existing Bucket sessions created before this update must also open the mailbox once. The existing IMAP hostname/port settings are used; no additional Mailcow permissions or master-user credentials are required.
+
+Address views match exact parsed email addresses, prioritizing `X-Original-To`/`Envelope-To`, then `To`/`Cc`, then `Delivered-To` when no explicit recipients remain. Alias views are filters of the destination inbox, not separate mailboxes or a delivery audit. Bcc, mailing lists, forwarding, and missing or rewritten headers can prevent a message from appearing under an address. Recipient headers can be forged; filtering is a convenience within an already authorized mailbox, not a security boundary between recipients. Messages to multiple addresses can appear in more than one view.
+
+HTML email is sanitized and displayed in an isolated sandbox. Scripts, remote images, forms, and link navigation are blocked. Attachments download as files rather than being rendered inline. Message contents and attachments are never cached by Bucket’s service worker. IMAP UIDs are checked against UID validity and recipient filters on message, attachment, and read-state requests.
+
+For a lightweight runtime, Bucket opens at most 8 mailboxes per session and 128 in total, with 4 concurrent inbox operations. Pages scan at most 2,000 UIDs/200 matching candidates and display up to 50 messages; **Load more** continues the scan. Large or complex emails must be opened in another client: message limit 5 MiB, formatted content limit 256 KiB, and at most 100 MIME content-type headers. These limits protect the application when processing untrusted incoming mail.

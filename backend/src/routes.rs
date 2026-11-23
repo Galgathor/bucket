@@ -9,7 +9,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -26,6 +26,12 @@ pub fn router(app: App) -> Router {
         .route("/logout", post(logout))
         .route("/me", get(me))
         .route("/preferences", put(preferences))
+        .route("/mail/addresses", get(mail_addresses))
+        .route("/mail/unlock", post(mail_unlock))
+        .route("/mail/messages", get(mail_messages))
+        .route("/mail/message", get(mail_message))
+        .route("/mail/read", put(mail_read))
+        .route("/mail/attachment", get(mail_attachment))
         .route("/addresses", get(addresses).post(create))
         .route("/addresses/{id}", put(edit).delete(delete))
         .route("/admin/config", get(configuration).put(save_configuration))
@@ -150,6 +156,7 @@ async fn authenticated(app: &App, headers: &HeaderMap, mutation: bool) -> Result
             && v.get("authsource").is_none_or(|s| s == "mailcow")
     }) {
         app.db.delete_session(&session.token)?;
+        app.inbox.remove(&session.token);
         return Err(unauthorized());
     }
     Ok((user, session))
@@ -251,10 +258,22 @@ async fn login(
             "The mail server did not return a mailbox creation identity. Ask your administrator to check that the Mailcow version is supported.",
         ));
     }
-    if !app
+    let mail_connection = app
         .auth
-        .authenticate(normalized.clone(), input.password)
-        .await?
+        .connect(normalized.clone(), input.password.clone())
+        .await
+        .map_err(|e| {
+            if e.status == StatusCode::UNAUTHORIZED {
+                denied("credentials_rejected", &e.message)
+            } else {
+                e
+            }
+        })?;
+    if mail_connection.is_none()
+        && !app
+            .auth
+            .authenticate(normalized.clone(), input.password)
+            .await?
     {
         return Err(denied(
             "credentials_rejected",
@@ -294,6 +313,7 @@ async fn login(
         .bind_identity(&normalized, &mailcow::identity(&mailbox))?;
     if let Some(old) = session_cookie(&app, &headers) {
         app.db.delete_session(&hash(&old))?;
+        app.inbox.remove(&hash(&old));
     }
     let value = token();
     let session = Session {
@@ -304,6 +324,14 @@ async fn login(
         identity: mailcow::identity(&mailbox),
     };
     app.db.save_session(&session)?;
+    if let Some(connection) = mail_connection
+        && app
+            .inbox
+            .insert(&session, &user.email, &session.identity, connection)
+            .is_err()
+    {
+        tracing::warn!("primary inbox connection limit reached; sign-in remains available");
+    }
     app.db.audit(&user.email, "login", "", "success")?;
     let mut response =
         Json(json!({"email":user.email,"admin":user.email==app.config.admin,"csrf":session.csrf}))
@@ -325,6 +353,7 @@ async fn logout(State(app): State<App>, headers: HeaderMap) -> Result<Response> 
             return Err(Error::forbidden("Refresh this page and try again."));
         }
         app.db.delete_session(&session.token)?;
+        app.inbox.remove(&session.token);
     }
     let mut response = Json(json!({"ok":true})).into_response();
     response.headers_mut().insert(
@@ -510,4 +539,79 @@ async fn resolve(
 async fn audit(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>> {
     administrator(&app, &headers, false).await?;
     Ok(Json(json!({"events":app.db.audits()?})))
+}
+
+async fn mail_addresses(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>> {
+    let (user, s) = authenticated(&app, &headers, false).await?;
+    Ok(Json(
+        json!({"addresses":app.mail_addresses(&user,&s).await?}),
+    ))
+}
+async fn mail_unlock(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<crate::inbox::Unlock>,
+) -> Result<Json<Value>> {
+    let (user, s) = authenticated(&app, &headers, true).await?;
+    app.mail_unlock(&user, &s, input).await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn mail_messages(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Query(q): Query<crate::inbox::MailQuery>,
+) -> Result<Json<Value>> {
+    let (user, s) = authenticated(&app, &headers, false).await?;
+    Ok(Json(app.mail_list(&user, &s, q).await?))
+}
+async fn mail_message(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Query(q): Query<crate::inbox::MailQuery>,
+) -> Result<Json<crate::inbox::Body>> {
+    let (user, s) = authenticated(&app, &headers, false).await?;
+    Ok(Json(app.mail_body(&user, &s, q, None).await?.0))
+}
+async fn mail_read(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<crate::inbox::Read>,
+) -> Result<Json<Value>> {
+    let (user, s) = authenticated(&app, &headers, true).await?;
+    let q = crate::inbox::MailQuery {
+        address: input.address,
+        uid: Some(input.uid),
+        validity: Some(input.validity),
+        before: None,
+        part: None,
+    };
+    app.mail_body(&user, &s, q, Some(input.read)).await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn mail_attachment(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Query(q): Query<crate::inbox::MailQuery>,
+) -> Result<Response> {
+    let (user, s) = authenticated(&app, &headers, false).await?;
+    if q.part.is_none() {
+        return Err(Error::bad("Choose an attachment."));
+    }
+    let (_, attachment) = app.mail_body(&user, &s, q, None).await?;
+    let (name, data) =
+        attachment.ok_or_else(|| Error::new(StatusCode::NOT_FOUND, "Attachment not found."))?;
+    let encoded: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
+    let mut response = data.into_response();
+    response.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        "content-disposition",
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"attachment\"; filename*=UTF-8''{encoded}"
+        ))
+        .map_err(|_| Error::internal())?,
+    );
+    Ok(response)
 }

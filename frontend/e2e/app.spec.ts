@@ -13,10 +13,12 @@ async function setup(
   {
     admin = false,
     signedIn = true,
-  }: { admin?: boolean; signedIn?: boolean } = {},
+    mailLocked = false,
+  }: { admin?: boolean; signedIn?: boolean; mailLocked?: boolean } = {},
 ) {
   let authenticated = signedIn;
   let aliasSuffix = true;
+  let mailboxUnlocked = !mailLocked;
   let config = { domains: ["example.com"], policy };
   let addresses = [
     {
@@ -51,6 +53,67 @@ async function setup(
     requests.push({ path, body });
     const respond = (data: unknown, status = 200) =>
       route.fulfill({ status, json: data });
+    const target = new URL(req.url()).searchParams.get("address");
+    const mail = {
+      uid: target === "shopping@example.com" ? 102 : 101,
+      subject:
+        target === "shopping@example.com" ? "Your receipt" : "Hello Alex",
+      from: "Sender <sender@example.net>",
+      to: target ?? "alex@example.com",
+      date: "Mon, 23 Nov 2026 12:00:00 +0000",
+      read: false,
+      size: 1200,
+    };
+    if (path === "/api/mail/addresses")
+      return respond({
+        addresses: [
+          {
+            address: "alex@example.com",
+            mailbox: "alex@example.com",
+            kind: "mailbox",
+            name: "Primary mailbox",
+            unlocked: mailboxUnlocked,
+          },
+          {
+            address: "shopping@example.com",
+            mailbox: "alex@example.com",
+            kind: "alias",
+            name: "Shopping",
+            unlocked: mailboxUnlocked,
+          },
+          {
+            address: "work@example.com",
+            mailbox: "work@example.com",
+            kind: "mailbox",
+            name: "Work",
+            unlocked: mailboxUnlocked,
+          },
+        ],
+      });
+    if (path === "/api/mail/unlock") {
+      if (body.password === "wrong")
+        return respond(
+          { error: "The mailbox password was not accepted." },
+          422,
+        );
+      mailboxUnlocked = true;
+      return respond({ ok: true });
+    }
+    if (path === "/api/mail/messages")
+      return mailboxUnlocked
+        ? respond({ messages: [mail], next: null, validity: 42 })
+        : respond(
+            { error: "Enter this mailbox’s password to open its inbox." },
+            423,
+          );
+    if (path === "/api/mail/message")
+      return respond({
+        message: mail,
+        text: "Hello from your inbox.",
+        html: "",
+        attachments: [{ part: 1, name: "receipt.txt", size: 4 }],
+      });
+    if (path === "/api/mail/read") return respond({ ok: true });
     if (path === "/api/login") {
       authenticated = true;
       return respond({ csrf: "test-csrf" });
@@ -436,4 +499,167 @@ test("accessible dashboard, forms, and dark theme", async ({ page }) => {
     page.getByRole("heading", { name: "Default limits" }),
   ).toBeVisible();
   await check();
+});
+
+test("read messages and switch to an alias without mixing inboxes", async ({
+  page,
+}, info) => {
+  const requests = await setup(page, { admin: true });
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Unread: Hello Alex", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Unread: Hello Alex", exact: true })
+    .click();
+  await expect(
+    page.getByText("Hello from your inbox.", { exact: true }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      requests.some((r) => r.path === "/api/mail/read" && r.body.read === true),
+    )
+    .toBe(true);
+  await page.getByRole("button", { name: "Mark unread", exact: true }).click();
+  await expect
+    .poll(() =>
+      requests.some(
+        (r) => r.path === "/api/mail/read" && r.body.read === false,
+      ),
+    )
+    .toBe(true);
+  await expect(page.getByRole("link", { name: "receipt.txt" })).toContainText(
+    "4 B",
+  );
+  await expect(page.getByRole("link", { name: "receipt.txt" })).toHaveAttribute(
+    "href",
+    /address=alex%40example.com.*uid=101.*validity=42.*part=1/,
+  );
+  await page
+    .getByRole("combobox", { name: "Email address", exact: true })
+    .selectOption("shopping@example.com");
+  await expect(
+    page.getByRole("button", { name: "Unread: Your receipt", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /Hello Alex/ }),
+  ).not.toBeVisible();
+  await page
+    .getByRole("button", { name: "Unread: Your receipt", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Your receipt", exact: true }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({ path: info.outputPath("inbox.png"), fullPage: true });
+  const { default: AxeBuilder } = await import("@axe-core/playwright");
+  const results = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+    .analyze();
+  expect(
+    results.violations.map((v) => ({
+      id: v.id,
+      nodes: v.nodes.map((n) => n.target),
+    })),
+  ).toEqual([]);
+});
+test("unlock a mailbox without retaining its password", async ({ page }) => {
+  await setup(page, { mailLocked: true });
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Open mailbox" }),
+  ).toBeVisible();
+  await page.getByLabel("Password", { exact: true }).fill("wrong");
+  await page.getByRole("button", { name: "Open inbox", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveText(
+    "The mailbox password was not accepted.",
+  );
+  await expect(page.getByLabel("Password", { exact: true })).toHaveValue("");
+  await page.getByLabel("Password", { exact: true }).fill("mail-password");
+  await page.getByRole("button", { name: "Open inbox", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Unread: Hello Alex", exact: true }),
+  ).toBeVisible();
+});
+test("inbox ignores a late response after switching addresses", async ({
+  page,
+}) => {
+  await setup(page);
+  let finish: () => void = () => {};
+  const pending = new Promise<void>((resolve) => (finish = resolve));
+  await page.route("**/api/mail/message?**", async (route) => {
+    await pending;
+    await route.fulfill({
+      json: {
+        message: {
+          uid: 101,
+          subject: "Old mailbox",
+          from: "old@example.com",
+          to: "alex@example.com",
+          date: "",
+          read: true,
+          size: 1,
+        },
+        text: "Stale body",
+        html: "",
+        attachments: [],
+      },
+    });
+  });
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Unread: Hello Alex", exact: true })
+    .click();
+  await page
+    .getByRole("combobox", { name: "Email address", exact: true })
+    .selectOption("shopping@example.com");
+  finish();
+  await expect(
+    page.getByRole("button", { name: "Unread: Your receipt", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Stale body", { exact: true })).not.toBeVisible();
+});
+
+test("HTML email remains readable under production CSP and cannot execute or track", async ({
+  page,
+}) => {
+  const requests: string[] = [];
+  const logs: string[] = [];
+  page.on("requestfinished", (r) => requests.push(r.url()));
+  page.on("console", (m) => logs.push(m.text()));
+  await page.route("**/mail-preview-check", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      headers: {
+        "Content-Security-Policy":
+          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        "X-Frame-Options": "DENY",
+      },
+      body: '<!doctype html><html><head><title>Email preview</title></head><body><iframe title="Email content" sandbox=""></iframe></body></html>',
+    }),
+  );
+  await page.goto("/mail-preview-check");
+  await page.locator("iframe").evaluate((node) => {
+    (node as HTMLIFrameElement).srcdoc =
+      `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; form-action 'none'; base-uri 'none'"><meta name="color-scheme" content="light"><style>body{color:#242633;background:#fff;font:16px system-ui}</style></head><body><p>Readable HTML email</p><script>console.log('email-script-executed')</script><img src="https://tracker.invalid/email.png"></body></html>`;
+  });
+  await expect(
+    page.frameLocator("iframe").getByText("Readable HTML email"),
+  ).toBeVisible();
+  expect(requests.some((url) => url.includes("tracker.invalid"))).toBe(false);
+  await expect
+    .poll(() =>
+      logs.some(
+        (log) =>
+          log.includes("tracker.invalid") &&
+          log.includes("Content Security Policy") &&
+          log.includes("blocked"),
+      ),
+    )
+    .toBe(true);
+  expect(logs).not.toContain("email-script-executed");
 });

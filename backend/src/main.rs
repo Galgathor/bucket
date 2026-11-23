@@ -16,6 +16,15 @@ async fn main() {
     }
     // SQLite locking protects upgrades. Only one application instance may own a database.
     let app = App::new(config.clone()).expect("initialize application database");
+    let inbox = app.inbox.clone();
+    let database = app.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            inbox.cleanup(&database);
+        }
+    });
     let listener = tokio::net::TcpListener::bind(&config.bind)
         .await
         .expect("bind listener");

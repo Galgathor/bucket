@@ -17,6 +17,7 @@ import { api, ApiError, setCsrf, type Me } from "./api";
 import { Busy, ErrorMessage, InfoButton } from "./components";
 import { Dashboard } from "./Dashboard";
 import { Admin } from "./Admin";
+import { Inbox } from "./Inbox";
 import "./style.css";
 
 type InstallEvent = Event & {
@@ -155,6 +156,13 @@ function App() {
                 <Mail size={17} />
                 <span>Addresses</span>
               </button>
+              <button
+                className={page === "inbox" ? "active" : ""}
+                onClick={() => setPage("inbox")}
+              >
+                <Mail size={17} />
+                <span>Inbox</span>
+              </button>
               {me.admin && (
                 <button
                   className={page === "settings" ? "active" : ""}
@@ -276,6 +284,8 @@ function App() {
       ) : me ? (
         page === "settings" && me.admin ? (
           <Admin refreshMe={refreshMe} notify={notify} />
+        ) : page === "inbox" ? (
+          <Inbox key={me.email} me={me} notify={notify} />
         ) : (
           <Dashboard
             key={me.email}

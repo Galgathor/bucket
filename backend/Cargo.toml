@@ -24,6 +24,8 @@ imap = "=3.0.0-alpha.15"
 native-tls = "0.2"
 url = "2"
 regex = "1"
+mailparse = "0.16"
+ammonia = "4"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -994,3 +994,319 @@ fn upgrades_existing_database_and_retains_alias_preferences() {
     let db = bucket::db::Db::open(path).unwrap();
     assert!(!db.alias_suffix("alice@example.com").unwrap());
 }
+
+struct InboxAuth {
+    port: u16,
+}
+#[async_trait::async_trait]
+impl Authenticator for InboxAuth {
+    async fn authenticate(&self, _: String, _: String) -> Result<bool> {
+        Ok(true)
+    }
+    async fn connect(
+        &self,
+        email: String,
+        password: String,
+    ) -> Result<Option<bucket::mailcow::ImapSession>> {
+        let port = self.port;
+        tokio::task::spawn_blocking(move || {
+            let cert = native_tls::Certificate::from_pem(include_bytes!("fixtures/imap-cert.pem"))
+                .unwrap();
+            let tls = native_tls::TlsConnector::builder()
+                .add_root_certificate(cert)
+                .build()
+                .unwrap();
+            let stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            let stream = tls.connect("localhost", stream).unwrap();
+            let mut client = imap::Client::new(stream);
+            client.read_greeting().unwrap();
+            client.login(email, password).map(Some).map_err(|_| {
+                bucket::error::Error::new(StatusCode::UNAUTHORIZED, "Password rejected.")
+            })
+        })
+        .await
+        .unwrap()
+    }
+}
+fn inbox_server() -> (u16, Arc<AtomicUsize>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stores = Arc::new(AtomicUsize::new(0));
+    let changes = stores.clone();
+    std::thread::spawn(move || {
+        let identity = native_tls::Identity::from_pkcs8(
+            include_bytes!("fixtures/imap-cert.pem"),
+            include_bytes!("fixtures/imap-key.pem"),
+        )
+        .unwrap();
+        let tls = native_tls::TlsAcceptor::new(identity).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let mut stream = tls.accept(stream).unwrap();
+        stream.write_all(b"* OK test IMAP ready\r\n").unwrap();
+        let mut reader = BufReader::new(stream);
+        let header = "From: =?UTF-8?B?Sm9zw6k=?= <sender@example.net>\r\nTo: shop@example.com\r\nSubject: Receipt\r\nDate: Mon, 23 Nov 2026 12:00:00 +0000\r\nX-Original-To: shop@example.com\r\n";
+        let other = "From: someone@example.net\r\nTo: not-shop@example.com\r\nSubject: Not your selected alias\r\nX-Original-To: not-shop@example.com\r\n";
+        let body = format!(
+            "{header}MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=abc\r\n\r\n--abc\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello from the inbox.\r\n--abc\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=receipt.txt\r\n\r\nPaid\r\n--abc--\r\n"
+        );
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            let tag = line.split_whitespace().next().unwrap().to_string();
+            let command = line.to_uppercase();
+            let stream = reader.get_mut();
+            let result = if command.contains(" LOGIN ") {
+                if line.contains("mail-password") {
+                    write!(stream, "{tag} OK logged in\r\n")
+                } else {
+                    write!(stream, "{tag} NO rejected\r\n")
+                }
+            } else if command.contains(" SELECT ") {
+                write!(
+                    stream,
+                    "* FLAGS (\\Seen)\r\n* 2 EXISTS\r\n* OK [UIDVALIDITY 42] stable\r\n* OK [UIDNEXT 3] next\r\n{tag} OK [READ-WRITE] selected\r\n"
+                )
+            } else if command.contains(" UID SEARCH ") {
+                write!(stream, "* SEARCH 1 2\r\n{tag} OK search\r\n")
+            } else if command.contains(" UID FETCH ") {
+                let set = line.split_whitespace().nth(3).unwrap();
+                let header_request = command.contains("BODY.PEEK[HEADER]");
+                if header_request {
+                    for (uid, data) in [(1, header), (2, other)] {
+                        if set.split(',').any(|s| s == uid.to_string()) {
+                            write!(stream,"* {uid} FETCH (UID {uid} FLAGS () RFC822.SIZE {} BODY[HEADER]<0> {{{}}}\r\n{data})\r\n",body.len(),data.len()).unwrap();
+                        }
+                    }
+                } else {
+                    write!(
+                        stream,
+                        "* 1 FETCH (UID 1 BODY[]<0> {{{}}}\r\n{})\r\n",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                }
+                write!(stream, "{tag} OK fetched\r\n")
+            } else if command.contains(" UID STORE ") {
+                changes.fetch_add(1, Ordering::SeqCst);
+                write!(stream, "{tag} OK stored\r\n")
+            } else if command.contains(" LOGOUT") {
+                let _ = write!(stream, "* BYE logout\r\n{tag} OK logout\r\n");
+                break;
+            } else {
+                write!(stream, "{tag} BAD unsupported\r\n")
+            };
+            if result.is_err() {
+                break;
+            }
+            line.clear();
+        }
+    });
+    (port, stores)
+}
+#[tokio::test]
+async fn inbox_alias_filter_read_flags_attachments_and_authorization() {
+    let mut f = Fixture::new().await;
+    let alice = f.session("alice@example.com");
+    let bob = f.session("bob@example.com");
+    let (port, stores) = inbox_server();
+    f.app.auth = Arc::new(InboxAuth { port });
+    f.alias(&alice, "shop").await;
+    let (s, _, _) = f
+        .call(
+            "GET",
+            "/api/mail/messages?address=shop%40example.com",
+            Some(&alice),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::LOCKED);
+    let (s, v, _) = f
+        .call(
+            "POST",
+            "/api/mail/unlock",
+            Some(&alice),
+            Some(json!({"address":"shop@example.com","password":"mail-password"})),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v, _) = f
+        .call(
+            "GET",
+            "/api/mail/messages?address=shop%40example.com",
+            Some(&alice),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(v["messages"][0]["subject"], "Receipt");
+    assert!(v["messages"][0]["from"].as_str().unwrap().contains("José"));
+    assert_eq!(v["validity"], 42);
+    let path = "/api/mail/message?address=shop%40example.com&uid=1&validity=42";
+    let (s, v, _) = f.call("GET", path, Some(&alice), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(v["text"].as_str().unwrap().contains("Hello from the inbox"));
+    assert_eq!(v["attachments"][0]["name"], "receipt.txt");
+    assert_eq!(stores.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        f.call(
+            "GET",
+            "/api/mail/message?address=shop%40example.com&uid=2&validity=42",
+            Some(&alice),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        f.call(
+            "GET",
+            "/api/mail/message?address=shop%40example.com&uid=1&validity=43",
+            Some(&alice),
+            None
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        f.call("GET", path, Some(&bob), None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        f.call(
+            "PUT",
+            "/api/mail/read",
+            Some(&alice),
+            Some(json!({"address":"shop@example.com","uid":1,"validity":42,"read":true}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(stores.load(Ordering::SeqCst), 1);
+    let response = bucket::router(f.app.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/mail/attachment?address=shop%40example.com&uid=1&validity=42&part=1")
+                .header("cookie", format!("__Host-bucket={}", alice.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains("receipt.txt")
+    );
+    assert!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .starts_with(b"Paid")
+    );
+    assert_eq!(
+        f.call("POST", "/api/logout", Some(&alice), None).await.0,
+        StatusCode::OK
+    );
+    assert!(!f.app.inbox.opened(
+        &bucket::model::Session {
+            token: hash(&alice.0),
+            email: "alice@example.com".into(),
+            csrf: alice.1.clone(),
+            expires: now() + 3600,
+            identity: "2026-01-01 00:00:00".into()
+        },
+        "alice@example.com",
+        "2026-01-01 00:00:00"
+    ));
+}
+#[test]
+fn recipient_filter_is_exact_and_html_cannot_load_remote_content() {
+    use bucket::inbox::{recipients_match, sanitize_html};
+    assert!(recipients_match(
+        b"To: Friends: shop@example.com, other@example.com;\r\n\r\n",
+        "shop@example.com"
+    ));
+    assert!(!recipients_match(
+        b"To: not-shop@example.com\r\n\r\n",
+        "shop@example.com"
+    ));
+    assert!(!recipients_match(
+        b"To: shop@example.com\r\nX-Original-To: other@example.com\r\n\r\n",
+        "shop@example.com"
+    ));
+    assert!(recipients_match(
+        b"To: undisclosed-recipients:;\r\nDelivered-To: shop@example.com\r\n\r\n",
+        "shop@example.com"
+    ));
+    let html = sanitize_html(
+        "<script>alert(1)</script><img src='https://tracker.invalid/a'><a href='/api/evil' onclick='alert(1)'>Hello</a><form action='https://evil.invalid'>Submit</form>",
+    );
+    for bad in ["<script", "<img", "onclick", "href=", "action="] {
+        assert!(!html.contains(bad), "{bad}: {html}");
+    }
+    assert!(html.contains("default-src 'none'"));
+    assert!(html.contains("Hello"));
+}
+
+#[tokio::test]
+async fn signing_in_opens_primary_inbox_without_storing_a_password() {
+    let mut f = Fixture::new().await;
+    let (port, _) = inbox_server();
+    f.app.auth = Arc::new(InboxAuth { port });
+    let (status, value, headers) = f
+        .call(
+            "POST",
+            "/api/login",
+            None,
+            Some(json!({"email":"alice@example.com","password":"mail-password"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let cookie = headers["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .split_once('=')
+        .unwrap()
+        .1
+        .to_owned();
+    let session = (cookie, value["csrf"].as_str().unwrap().to_owned());
+    let (status, addresses, _) = f
+        .call("GET", "/api/mail/addresses", Some(&session), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(addresses["addresses"][0]["unlocked"], true);
+    let mut invalid = session.clone();
+    invalid.1 = "wrong".into();
+    assert_eq!(
+        f.call(
+            "PUT",
+            "/api/mail/read",
+            Some(&invalid),
+            Some(json!({"address":"alice@example.com","uid":1,"validity":42,"read":true}))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let audit = serde_json::to_string(&f.app.db.audits().unwrap()).unwrap();
+    assert!(!audit.contains("mail-password"));
+}

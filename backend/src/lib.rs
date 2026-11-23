@@ -1,6 +1,7 @@
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod inbox;
 pub mod mailcow;
 pub mod model;
 mod routes;
@@ -18,6 +19,7 @@ pub struct App {
     pub mailcow: mailcow::Mailcow,
     pub auth: Arc<dyn mailcow::Authenticator>,
     pub writes: Arc<tokio::sync::Mutex<()>>,
+    pub inbox: Arc<inbox::Connections>,
 }
 impl App {
     pub fn new(config: config::Config) -> error::Result<Self> {
@@ -52,6 +54,7 @@ impl App {
             auth: Arc::new(mailcow::ImapAuth(config.clone())),
             config,
             writes: Arc::new(tokio::sync::Mutex::new(())),
+            inbox: Arc::new(inbox::Connections::default()),
         })
     }
 }
