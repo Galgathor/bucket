@@ -6,7 +6,7 @@ Detailed setup, maintenance, development, and troubleshooting notes. Run command
 
 1. In Mailcow, create a **read-write administrator API key** under **System → Configuration → Access → Administrators → API**. Restrict it to the public outbound IP of the Bucket server. Bucket and Mailcow do not need a shared Docker network.
 2. Copy `.env.example` to `.env` and set:
-   - `BUCKET_IMAGE`: your published image, for example `registry.example.com/galgathor/bucket:latest`.
+   - `BUCKET_IMAGE`: defaults to `ghcr.io/galgathor/bucket:latest`; override it for another registry or a pinned version.
    - `BUCKET_PUBLIC_URL`: Bucket’s external HTTPS origin.
    - `BUCKET_MAILCOW_URL` and `BUCKET_MAILCOW_API_KEY`.
    - `BUCKET_IMAP_HOST`: Mailcow’s certificate-valid IMAP hostname (implicit TLS, port 993 by default).
