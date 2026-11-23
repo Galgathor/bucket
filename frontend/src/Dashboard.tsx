@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Inbox,
 } from "lucide-react";
+import type { MailAddress } from "./mail";
 import { api, space, type Address, type Me } from "./api";
 import { AliasForm } from "./AliasForm";
 import { AddressForm, DeleteDialog } from "./AddressForm";
@@ -19,8 +20,10 @@ export function Dashboard({
   me,
   refreshMe,
   notify,
+  mailStatus,
 }: {
   me: Me;
+  mailStatus: MailAddress[];
   refreshMe: () => Promise<void>;
   notify: (s: string) => void;
 }) {
@@ -267,6 +270,20 @@ export function Dashboard({
                 <div className="address-details">
                   <div className="address-title">
                     <strong>{a.address}</strong>
+                    {(mailStatus.find((m) => m.address === a.address)?.unread ??
+                      0) > 0 && (
+                      <span className="unread-badge" aria-label="Unread email">
+                        <Mail size={13} />
+                        {
+                          mailStatus.find((m) => m.address === a.address)
+                            ?.unread
+                        }
+                        {mailStatus.find((m) => m.address === a.address)
+                          ?.unread_limited
+                          ? "+"
+                          : ""}
+                      </span>
+                    )}
                     <button
                       className="icon-button copy-button"
                       aria-label={"Copy " + a.address}

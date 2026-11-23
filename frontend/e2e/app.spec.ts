@@ -19,6 +19,7 @@ async function setup(
   let authenticated = signedIn;
   let aliasSuffix = true;
   let mailboxUnlocked = !mailLocked;
+  let messageFolder = "inbox";
   let config = { domains: ["example.com"], policy };
   let addresses = [
     {
@@ -64,7 +65,7 @@ async function setup(
       read: false,
       size: 1200,
     };
-    if (path === "/api/mail/addresses")
+    if (path === "/api/mail/addresses" || path === "/api/mail/status")
       return respond({
         addresses: [
           {
@@ -73,6 +74,9 @@ async function setup(
             kind: "mailbox",
             name: "Primary mailbox",
             unlocked: mailboxUnlocked,
+            sending_unlocked: mailboxUnlocked,
+            can_send: true,
+            unread: messageFolder === "inbox" ? 1 : 0,
           },
           {
             address: "shopping@example.com",
@@ -80,6 +84,9 @@ async function setup(
             kind: "alias",
             name: "Shopping",
             unlocked: mailboxUnlocked,
+            sending_unlocked: mailboxUnlocked,
+            can_send: true,
+            unread: messageFolder === "inbox" ? 1 : 0,
           },
           {
             address: "work@example.com",
@@ -87,6 +94,9 @@ async function setup(
             kind: "mailbox",
             name: "Work",
             unlocked: mailboxUnlocked,
+            sending_unlocked: mailboxUnlocked,
+            can_send: true,
+            unread: messageFolder === "inbox" ? 1 : 0,
           },
         ],
       });
@@ -101,7 +111,15 @@ async function setup(
     }
     if (path === "/api/mail/messages")
       return mailboxUnlocked
-        ? respond({ messages: [mail], next: null, validity: 42 })
+        ? respond({
+            messages:
+              (new URL(req.url()).searchParams.get("folder") ?? "inbox") ===
+              messageFolder
+                ? [mail]
+                : [],
+            next: null,
+            validity: 42,
+          })
         : respond(
             { error: "Enter this mailbox’s password to open its inbox." },
             423,
@@ -114,6 +132,12 @@ async function setup(
         attachments: [{ part: 1, name: "receipt.txt", size: 4 }],
       });
     if (path === "/api/mail/read") return respond({ ok: true });
+    if (path === "/api/mail/move") {
+      messageFolder = body.destination as string;
+      return respond({ ok: true });
+    }
+    if (path === "/api/mail/send")
+      return respond({ sent: true, copy_saved: true });
     if (path === "/api/login") {
       authenticated = true;
       return respond({ csrf: "test-csrf" });
@@ -663,4 +687,186 @@ test("HTML email remains readable under production CSP and cannot execute or tra
     )
     .toBe(true);
   expect(logs).not.toContain("email-script-executed");
+});
+
+test("compose, reply, and discard a draft", async ({ page }, info) => {
+  const requests = await setup(page);
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Email address", exact: true })
+    .selectOption("shopping@example.com");
+  await page.getByRole("button", { name: "Compose", exact: true }).click();
+  await page.getByLabel("To", { exact: true }).fill("friend@example.net");
+  await page.getByLabel("Subject", { exact: true }).fill("A quick note");
+  await page
+    .getByRole("textbox", { name: "Message", exact: true })
+    .fill("Hello there.");
+  const { default: AxeBuilder } = await import("@axe-core/playwright");
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
+  await page.screenshot({
+    path: info.outputPath("compose.png"),
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+  const sent = requests.find((r) => r.path === "/api/mail/send");
+  expect(sent?.body).toMatchObject({
+    address: "shopping@example.com",
+    to: "friend@example.net",
+    text: "Hello there.",
+  });
+  expect(sent?.body).not.toHaveProperty("password");
+  await page
+    .getByRole("button", { name: "Unread: Your receipt", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue(
+    "Sender <sender@example.net>",
+  );
+  await expect(page.getByLabel("Subject", { exact: true })).toHaveValue(
+    "Re: Your receipt",
+  );
+  await page
+    .getByRole("textbox", { name: "Message", exact: true })
+    .fill("Thanks!");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  expect(
+    requests.filter((r) => r.path === "/api/mail/send").at(-1)?.body.reply,
+  ).toMatchObject({ uid: 102, validity: 42, folder: "inbox" });
+  await page.getByRole("button", { name: "Compose", exact: true }).click();
+  await page
+    .getByRole("textbox", { name: "Message", exact: true })
+    .fill("Keep this draft");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Keep writing", exact: true }).click();
+  await expect(
+    page.getByRole("textbox", { name: "Message", exact: true }),
+  ).toHaveValue("Keep this draft");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Discard", exact: true }).click();
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+});
+
+test("move messages to spam and trash and restore them", async ({ page }) => {
+  const requests = await setup(page);
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Unread: Hello Alex", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Move to Spam", exact: true }).click();
+  await page
+    .locator(".mail-folder-tabs")
+    .getByRole("button", { name: "Spam", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Unread: Hello Alex", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Move to Trash", exact: true })
+    .click();
+  await page
+    .locator(".mail-folder-tabs")
+    .getByRole("button", { name: "Trash", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Unread: Hello Alex", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Move to Inbox", exact: true })
+    .click();
+  expect(
+    requests
+      .filter((r) => r.path === "/api/mail/move")
+      .map((r) => r.body.destination),
+  ).toEqual(["spam", "trash", "inbox"]);
+});
+
+test("refresh new mail and badges while preserving the open message and draft", async ({
+  page,
+  isMobile,
+}) => {
+  await page.clock.install();
+  const requests = await setup(page);
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Unread: Hello Alex", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Compose", exact: true }).click();
+  await page
+    .getByRole("textbox", { name: "Message", exact: true })
+    .fill("Unsent text");
+  let refreshed = false;
+  await page.route("**/api/mail/messages?**", (route) => {
+    refreshed = true;
+    return route.fulfill({
+      json: {
+        validity: 42,
+        next: null,
+        messages: [
+          {
+            uid: 105,
+            subject: "Just arrived",
+            from: "friend@example.net",
+            to: "alex@example.com",
+            date: "",
+            read: false,
+            size: 100,
+          },
+        ],
+      },
+    });
+  });
+  const before = requests.filter((r) => r.path === "/api/mail/status").length;
+  await page.clock.fastForward(31_000);
+  await expect.poll(() => refreshed).toBe(true);
+  await expect
+    .poll(() => requests.filter((r) => r.path === "/api/mail/status").length)
+    .toBeGreaterThan(before);
+  await expect(
+    page.getByRole("textbox", { name: "Message", exact: true }),
+  ).toHaveValue("Unsent text");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Discard", exact: true }).click();
+  await expect(
+    page.getByText("Hello from your inbox.", { exact: true }),
+  ).toBeVisible();
+  if (isMobile)
+    await page.getByRole("button", { name: "Messages", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Unread: Just arrived", exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".nav-unread")).toBeVisible();
+});
+
+test("uncertain delivery prevents an accidental resend", async ({ page }) => {
+  await setup(page);
+  let attempts = 0;
+  await page.route("**/api/mail/send", (route) => {
+    attempts++;
+    return route.fulfill({
+      status: 409,
+      json: {
+        error:
+          "Bucket could not confirm delivery. Check Sent before sending again.",
+      },
+    });
+  });
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  await page.getByRole("button", { name: "Compose", exact: true }).click();
+  await page.getByLabel("To", { exact: true }).fill("friend@example.net");
+  await page
+    .getByRole("textbox", { name: "Message", exact: true })
+    .fill("Send once");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Send", exact: true }),
+  ).toBeDisabled();
+  await expect(page.getByRole("alert")).toContainText("confirm delivery");
+  expect(attempts).toBe(1);
 });

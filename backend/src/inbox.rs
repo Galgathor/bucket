@@ -13,17 +13,17 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const MAX_MESSAGE: u32 = 5 * 1024 * 1024;
+pub(crate) const MAX_MESSAGE: u32 = 5 * 1024 * 1024;
 type ConnectionKey = (String, String);
 type ConnectionMap = HashMap<ConnectionKey, Arc<Connected>>;
-struct Connected {
-    client: Mutex<ImapSession>,
-    expires: i64,
+pub(crate) struct Connected {
+    pub(crate) client: Mutex<ImapSession>,
+    pub(crate) expires: i64,
     identity: String,
 }
 pub struct Connections {
     connections: Mutex<ConnectionMap>,
-    slots: Arc<tokio::sync::Semaphore>,
+    pub(crate) slots: Arc<tokio::sync::Semaphore>,
 }
 impl Default for Connections {
     fn default() -> Self {
@@ -65,6 +65,11 @@ impl Connections {
             m.retain(|(t, _), _| t != token);
         }
     }
+    pub fn remove_mailbox(&self, token: &str, mailbox: &str) {
+        if let Ok(mut map) = self.connections.lock() {
+            map.remove(&(token.into(), mailbox.into()));
+        }
+    }
     pub fn cleanup(&self, db: &crate::db::Db) {
         if let Ok(mut m) = self.connections.lock() {
             m.retain(|(token, _), _| db.session(token).ok().flatten().is_some());
@@ -73,7 +78,7 @@ impl Connections {
     pub fn opened(&self, session: &Session, mailbox: &str, identity: &str) -> bool {
         self.get(session, mailbox, identity).is_ok()
     }
-    fn get(&self, s: &Session, mailbox: &str, identity: &str) -> Result<Arc<Connected>> {
+    pub(crate) fn get(&self, s: &Session, mailbox: &str, identity: &str) -> Result<Arc<Connected>> {
         let map = self.connections.lock().map_err(|_| Error::internal())?;
         let conn = map
             .get(&(s.token.clone(), mailbox.into()))
@@ -92,7 +97,7 @@ fn locked() -> Error {
         "Enter this mailbox’s password to open its inbox.",
     )
 }
-fn unavailable() -> Error {
+pub(crate) fn unavailable() -> Error {
     Error::new(
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         "The inbox connection was interrupted. Open the mailbox again to reconnect.",
@@ -106,6 +111,8 @@ pub struct MailQuery {
     pub uid: Option<u32>,
     pub validity: Option<u32>,
     pub part: Option<usize>,
+    #[serde(default)]
+    pub folder: Folder,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -120,6 +127,8 @@ pub struct Read {
     pub uid: u32,
     pub validity: u32,
     pub read: bool,
+    #[serde(default)]
+    pub folder: Folder,
 }
 #[derive(Serialize, Clone)]
 pub struct MailAddress {
@@ -128,6 +137,8 @@ pub struct MailAddress {
     pub kind: String,
     pub name: String,
     pub unlocked: bool,
+    pub sending_unlocked: bool,
+    pub can_send: bool,
 }
 #[derive(Serialize)]
 pub struct Message {
@@ -138,6 +149,7 @@ pub struct Message {
     pub date: String,
     pub read: bool,
     pub size: u32,
+    pub reply_to: String,
 }
 #[derive(Serialize)]
 pub struct Attachment {
@@ -152,6 +164,26 @@ pub struct Body {
     pub html: String,
     pub attachments: Vec<Attachment>,
 }
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Folder {
+    #[default]
+    Inbox,
+    Spam,
+    Trash,
+    Sent,
+}
+impl Folder {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Inbox => "Inbox",
+            Self::Spam => "Spam",
+            Self::Trash => "Trash",
+            Self::Sent => "Sent",
+        }
+    }
+}
+
 pub struct Target {
     pub mailbox: String,
     pub identity: String,
@@ -218,6 +250,8 @@ impl App {
             if let Ok(target) = self.mail_target(user, s, &address).await {
                 result.push(MailAddress {
                     unlocked: self.inbox.opened(s, &target.mailbox, &target.identity),
+                    sending_unlocked: self.sending.opened(s, &target.mailbox, &target.identity),
+                    can_send: self.mail_can_send(user, s, &address).await?,
                     address,
                     mailbox: target.mailbox,
                     kind,
@@ -242,6 +276,7 @@ impl App {
                 "Too many attempts. Try again in 15 minutes.",
             ));
         }
+        let smtp_password = input.password.clone();
         let client = self
             .auth
             .connect(target.mailbox.clone(), input.password)
@@ -258,6 +293,13 @@ impl App {
             .ok_or_else(|| Error::bad("The mailbox password was not accepted."))?;
         self.inbox
             .insert(s, &target.mailbox, &target.identity, client)?;
+        if self
+            .open_sending(s, &target.mailbox, &target.identity, smtp_password)
+            .await
+            .is_err()
+        {
+            tracing::warn!("outgoing mail connection unavailable; inbox remains available");
+        }
         self.db
             .audit(&user.email, "mail.open", &input.address, "success")?;
         Ok(())
@@ -272,30 +314,82 @@ impl App {
                 "The inbox is busy. Try again shortly.",
             )
         })?;
-        tokio::task::spawn_blocking(move||{let _permit=permit;
-   let mut c=conn.client.lock().map_err(|_|Error::internal())?;if conn.expires<=now(){return Err(locked());}
-   let selected=c.select("INBOX").map_err(|_|unavailable())?;
-   let validity=selected.uid_validity.ok_or_else(unavailable)?;
-   if q.validity.is_some_and(|old|old!=validity){return Err(Error::conflict("The inbox changed. Refresh the message list."));}
-   let end=q.before.unwrap_or(selected.uid_next.unwrap_or(u32::MAX)).saturating_sub(1);
-   if end==0{return Ok(json!({"messages":[],"validity":validity,"next":null}));}
-   // Limit candidates scanned per page; IMAP HEADER searches are substring searches,
-   // so recheck parsed recipient addresses before returning any metadata.
-   let start=end.saturating_sub(1999).max(1);
-   let query=format!("UID {start}:{end} OR OR OR OR HEADER To \"{}\" HEADER Cc \"{}\" HEADER X-Original-To \"{}\" HEADER Delivered-To \"{}\" HEADER Envelope-To \"{}\"",q.address,q.address,q.address,q.address,q.address);
-   let mut ids:Vec<_>=c.uid_search(query).map_err(|_|unavailable())?.into_iter().filter(|id|*id<=end&&*id>=start).collect();ids.sort_unstable_by(|a,b|b.cmp(a));ids.truncate(200);
-   let next=ids.last().copied().filter(|id|*id>1).or((start>1).then_some(start));let mut messages=vec![];
-   for chunk in ids.chunks(25){
-    let set=chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-    let fetched=c.uid_fetch(set,"(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER]<0.65536>)").map_err(|_|unavailable())?;
-    for f in fetched.iter(){if let Some(header)=f.header() && recipients_match(header,&q.address){messages.push(summary(f,header));}}
-    if messages.len()>=50{break;}
-   }
-   messages.sort_by_key(|m|std::cmp::Reverse(m.uid));messages.truncate(50);
-   // Preserve pagination even when a sparse alias has no matches in this window.
-   let next=if messages.len()>=50{messages.last().map(|m|m.uid)}else{next};
-   Ok(json!({"messages":messages,"validity":validity,"next":next}))
-  }).await.map_err(|_|Error::internal())?
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut c = conn.client.lock().map_err(|_| Error::internal())?;
+            if conn.expires <= now() {
+                return Err(locked());
+            }
+            let selected = {
+                let Some(name) = resolve_folder(&mut c, &q.folder, false)? else {
+                    return Ok(json!({"messages":[],"validity":0,"next":null}));
+                };
+                c.select(&name).map_err(|_| unavailable())?
+            };
+            let validity = selected.uid_validity.ok_or_else(unavailable)?;
+            if q.validity.is_some_and(|old| old != validity) {
+                return Err(Error::conflict(
+                    "The inbox changed. Refresh the message list.",
+                ));
+            }
+            let end = q
+                .before
+                .unwrap_or(selected.uid_next.unwrap_or(u32::MAX))
+                .saturating_sub(1);
+            if end == 0 {
+                return Ok(json!({"messages":[],"validity":validity,"next":null}));
+            }
+            // Limit candidates scanned per page; IMAP HEADER searches are substring searches,
+            // so recheck parsed recipient addresses before returning any metadata.
+            let start = end.saturating_sub(1999).max(1);
+            let address_query = search_address(&q.address, &q.folder);
+            let query = format!("UID {start}:{end} {address_query}");
+            let mut ids: Vec<_> = c
+                .uid_search(query)
+                .map_err(|_| unavailable())?
+                .into_iter()
+                .filter(|id| *id <= end && *id >= start)
+                .collect();
+            ids.sort_unstable_by(|a, b| b.cmp(a));
+            ids.truncate(200);
+            let next = ids
+                .last()
+                .copied()
+                .filter(|id| *id > 1)
+                .or((start > 1).then_some(start));
+            let mut messages = vec![];
+            for chunk in ids.chunks(25) {
+                let set = chunk
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let fetched = c
+                    .uid_fetch(set, "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER]<0.65536>)")
+                    .map_err(|_| unavailable())?;
+                for f in fetched.iter() {
+                    if let Some(header) = f.header()
+                        && matches_folder(header, &q.address, &q.folder)
+                    {
+                        messages.push(summary(f, header));
+                    }
+                }
+                if messages.len() >= 50 {
+                    break;
+                }
+            }
+            messages.sort_by_key(|m| std::cmp::Reverse(m.uid));
+            messages.truncate(50);
+            // Preserve pagination even when a sparse alias has no matches in this window.
+            let next = if messages.len() >= 50 {
+                messages.last().map(|m| m.uid)
+            } else {
+                next
+            };
+            Ok(json!({"messages":messages,"validity":validity,"next":next}))
+        })
+        .await
+        .map_err(|_| Error::internal())?
     }
     pub async fn mail_body(
         &self,
@@ -319,7 +413,8 @@ impl App {
             if conn.expires <= now() {
                 return Err(locked());
             }
-            let selected = c.select("INBOX").map_err(|_| unavailable())?;
+            let name=resolve_folder(&mut c,&q.folder,false)?.ok_or_else(||Error::new(axum::http::StatusCode::NOT_FOUND,"This folder is empty."))?;
+            let selected = c.select(&name).map_err(|_| unavailable())?;
             if q.validity.is_none() || selected.uid_validity != q.validity {
                 return Err(Error::conflict(
                     "The inbox changed. Refresh the message list.",
@@ -337,7 +432,7 @@ impl App {
                 Error::new(axum::http::StatusCode::NOT_FOUND, "Message not found.")
             })?;
             let header = f.header().ok_or_else(unavailable)?;
-            if !recipients_match(header, &q.address) {
+            if !matches_folder(header, &q.address,&q.folder) {
                 return Err(Error::new(
                     axum::http::StatusCode::NOT_FOUND,
                     "Message not found.",
@@ -437,6 +532,7 @@ impl Message {
             date: self.date.clone(),
             read: self.read,
             size: self.size,
+            reply_to: self.reply_to.clone(),
         }
     }
 }
@@ -456,6 +552,7 @@ fn summary(f: &imap::types::Fetch<'_>, header: &[u8]) -> Message {
             .iter()
             .any(|flag| matches!(flag, imap::types::Flag::Seen)),
         size: f.size.unwrap_or(0),
+        reply_to: reply_recipient(&headers),
     }
 }
 pub fn recipients_match(header: &[u8], address: &str) -> bool {
@@ -527,4 +624,95 @@ pub fn sanitize_html(html: &str) -> String {
     format!(
         "<!doctype html><html><head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; form-action 'none'; base-uri 'none'\"><meta name=\"color-scheme\" content=\"light\"><style>body{{color:#242633;background:#fff;font:16px/1.6 system-ui;overflow-wrap:anywhere;padding:8px}}pre{{white-space:pre-wrap}}a{{color:inherit}}</style></head><body>{clean}</body></html>"
     )
+}
+
+pub(crate) fn resolve_folder(
+    client: &mut ImapSession,
+    folder: &Folder,
+    create: bool,
+) -> Result<Option<String>> {
+    use imap_proto::NameAttribute;
+    if *folder == Folder::Inbox {
+        return Ok(Some("INBOX".into()));
+    }
+    let names = client.list(None, Some("*")).map_err(|_| unavailable())?;
+    let special = names.iter().find(|name| {
+        name.attributes().iter().any(|a| {
+            matches!(
+                (folder, a),
+                (Folder::Spam, NameAttribute::Junk)
+                    | (Folder::Trash, NameAttribute::Trash)
+                    | (Folder::Sent, NameAttribute::Sent)
+            )
+        })
+    });
+    if let Some(name) = special {
+        return Ok(Some(name.name().into()));
+    }
+    let common = names.iter().find(|name| match folder {
+        Folder::Spam => ["junk", "spam"].contains(&name.name().to_ascii_lowercase().as_str()),
+        Folder::Trash => name.name().eq_ignore_ascii_case("Trash"),
+        Folder::Sent => ["sent", "sent messages", "sent items"]
+            .contains(&name.name().to_ascii_lowercase().as_str()),
+        Folder::Inbox => false,
+    });
+    if let Some(name) = common {
+        return Ok(Some(name.name().into()));
+    }
+    drop(names);
+    if !create {
+        return Ok(None);
+    }
+    let name = match folder {
+        Folder::Spam => "Junk",
+        Folder::Trash => "Trash",
+        Folder::Sent => "Sent",
+        Folder::Inbox => "INBOX",
+    };
+    client
+        .create(name)
+        .map_err(|_| Error::conflict("The mail server could not create this folder."))?;
+    Ok(Some(name.into()))
+}
+pub(crate) fn search_address(address: &str, folder: &Folder) -> String {
+    let incoming = format!(
+        "OR OR OR OR HEADER To \"{address}\" HEADER Cc \"{address}\" HEADER X-Original-To \"{address}\" HEADER Delivered-To \"{address}\" HEADER Envelope-To \"{address}\""
+    );
+    match folder {
+        Folder::Sent => format!("HEADER From \"{address}\""),
+        Folder::Trash => format!("OR HEADER From \"{address}\" {incoming}"),
+        _ => incoming,
+    }
+}
+pub(crate) fn matches_folder(header: &[u8], address: &str, folder: &Folder) -> bool {
+    let sender = || {
+        mailparse::parse_headers(header).ok().is_some_and(|(headers, _)| {
+            headers.get_first_value("From")
+                .and_then(|from| mailparse::addrparse(&from).ok())
+                .is_some_and(|list| list.iter().any(|item| {
+                    matches!(item, mailparse::MailAddr::Single(sender) if sender.addr.eq_ignore_ascii_case(address))
+                }))
+        })
+    };
+    match folder {
+        Folder::Sent => sender(),
+        Folder::Trash => sender() || recipients_match(header, address),
+        _ => recipients_match(header, address),
+    }
+}
+pub(crate) fn reply_recipient(headers: &[mailparse::MailHeader<'_>]) -> String {
+    headers
+        .get_first_value("Reply-To")
+        .or_else(|| headers.get_first_value("From"))
+        .and_then(|s| mailparse::addrparse(&s).ok())
+        .and_then(|list| {
+            list.iter().find_map(|item| {
+                if let mailparse::MailAddr::Single(s) = item {
+                    Some(s.addr.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_default()
 }

@@ -27,6 +27,12 @@ pub fn router(app: App) -> Router {
         .route("/me", get(me))
         .route("/preferences", put(preferences))
         .route("/mail/addresses", get(mail_addresses))
+        .route("/mail/status", get(mail_status))
+        .route("/mail/move", post(mail_move))
+        .route(
+            "/mail/send",
+            post(mail_send).layer(DefaultBodyLimit::max(128 * 1024)),
+        )
         .route("/mail/unlock", post(mail_unlock))
         .route("/mail/messages", get(mail_messages))
         .route("/mail/message", get(mail_message))
@@ -157,6 +163,7 @@ async fn authenticated(app: &App, headers: &HeaderMap, mutation: bool) -> Result
     }) {
         app.db.delete_session(&session.token)?;
         app.inbox.remove(&session.token);
+        app.sending.remove(&session.token);
         return Err(unauthorized());
     }
     Ok((user, session))
@@ -258,6 +265,7 @@ async fn login(
             "The mail server did not return a mailbox creation identity. Ask your administrator to check that the Mailcow version is supported.",
         ));
     }
+    let smtp_password = input.password.clone();
     let mail_connection = app
         .auth
         .connect(normalized.clone(), input.password.clone())
@@ -314,6 +322,7 @@ async fn login(
     if let Some(old) = session_cookie(&app, &headers) {
         app.db.delete_session(&hash(&old))?;
         app.inbox.remove(&hash(&old));
+        app.sending.remove(&hash(&old));
     }
     let value = token();
     let session = Session {
@@ -324,6 +333,7 @@ async fn login(
         identity: mailcow::identity(&mailbox),
     };
     app.db.save_session(&session)?;
+    let open_smtp = mail_connection.is_some();
     if let Some(connection) = mail_connection
         && app
             .inbox
@@ -331,6 +341,15 @@ async fn login(
             .is_err()
     {
         tracing::warn!("primary inbox connection limit reached; sign-in remains available");
+    }
+    drop(_guard);
+    if open_smtp
+        && app
+            .open_sending(&session, &user.email, &session.identity, smtp_password)
+            .await
+            .is_err()
+    {
+        tracing::warn!("outgoing mail connection unavailable; sign-in remains available");
     }
     app.db.audit(&user.email, "login", "", "success")?;
     let mut response =
@@ -354,6 +373,7 @@ async fn logout(State(app): State<App>, headers: HeaderMap) -> Result<Response> 
         }
         app.db.delete_session(&session.token)?;
         app.inbox.remove(&session.token);
+        app.sending.remove(&session.token);
     }
     let mut response = Json(json!({"ok":true})).into_response();
     response.headers_mut().insert(
@@ -584,6 +604,7 @@ async fn mail_read(
         validity: Some(input.validity),
         before: None,
         part: None,
+        folder: input.folder,
     };
     app.mail_body(&user, &s, q, Some(input.read)).await?;
     Ok(Json(json!({"ok":true})))
@@ -614,4 +635,26 @@ async fn mail_attachment(
         .map_err(|_| Error::internal())?,
     );
     Ok(response)
+}
+
+async fn mail_status(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>> {
+    let (user, s) = authenticated(&app, &headers, false).await?;
+    Ok(Json(app.mail_status(&user, &s).await?))
+}
+async fn mail_move(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<crate::mail_actions::Move>,
+) -> Result<Json<Value>> {
+    let (user, s) = authenticated(&app, &headers, true).await?;
+    app.mail_move(&user, &s, input).await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn mail_send(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<crate::sending::SendDraft>,
+) -> Result<Json<Value>> {
+    let (user, s) = authenticated(&app, &headers, true).await?;
+    Ok(Json(app.mail_send(&user, &s, input).await?))
 }

@@ -21,13 +21,16 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 imap = "=3.0.0-alpha.15"
+imap-proto = "0.16"
 native-tls = "0.2"
 url = "2"
 regex = "1"
 mailparse = "0.16"
 ammonia = "4"
+lettre = { version = "0.11.24", default-features = false, features = ["smtp-transport", "native-tls", "builder"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
+base64 = "0.22"

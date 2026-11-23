@@ -1983,3 +1983,143 @@ input[role="switch"]:checked:after {
     flex: 1;
   }
 }
+.mail-folder-tabs {
+  padding: 0 20px;
+  gap: 25px;
+  border-bottom: 1px solid var(--border);
+}
+.mail-folder-tabs button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.message-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.unread-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.nav-unread {
+  height: 7px;
+  width: 7px;
+  background: var(--accent);
+  border-radius: 50%;
+  margin-left: -3px;
+}
+.inbox-switch {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.inbox-switch select {
+  max-width: 330px;
+}
+.inbox-switch > .button {
+  margin-left: 5px;
+}
+.compose-from {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  background: var(--surface-hover);
+  padding: 12px;
+  border-radius: 7px;
+  margin-bottom: 18px;
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+}
+.compose-from span {
+  color: var(--muted);
+}
+.compose-from strong {
+  font-weight: 550;
+  min-width: 0;
+}
+textarea {
+  font: inherit;
+  font-size: 0.94rem;
+  display: block;
+  width: 100%;
+  resize: vertical;
+  min-height: 160px;
+  max-height: 45vh;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 12px;
+  margin-top: 8px;
+}
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+textarea:disabled {
+  opacity: 0.65;
+}
+.compose-notice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.compose-notice svg {
+  flex-shrink: 0;
+}
+.message-heading > div:first-child {
+  min-width: 0;
+}
+@media (max-width: 600px) {
+  .mail-folder-tabs {
+    padding: 0 14px;
+    gap: 24px;
+  }
+  .mail-folder-tabs button {
+    gap: 5px;
+  }
+  .mail-folder-tabs button svg {
+    width: 14px;
+  }
+  .inbox-switch {
+    justify-content: flex-start;
+  }
+  .inbox-switch select {
+    max-width: none;
+    flex-basis: 65%;
+  }
+  .inbox-switch > .button {
+    margin-left: 0;
+  }
+  .message-heading {
+    flex-direction: column;
+    gap: 16px;
+  }
+  .message-actions {
+    justify-content: flex-start;
+  }
+  .address-title .unread-badge svg {
+    display: none;
+  }
+  .address-title .unread-badge {
+    font-size: 0.7rem;
+    padding: 2px 4px;
+  }
+  .creation-actions .button {
+    min-width: 0;
+  }
+}

@@ -32,11 +32,15 @@ Switch between your mailboxes and aliases to see messages matching that address.
 
 ![Bucket inbox showing messages addressed to a selected alias](docs/screenshots/inbox.png)
 
+Write a quick message from the selected address.
+
+![Bucket compose dialog](docs/screenshots/compose.png)
+
 ## What you get
 
 - **Aliases for different parts of your life.** Forward to your primary mailbox or another mailbox you own. Rename, copy, turn off, or delete them when needed.
 - **Independent mailboxes.** Create an inbox with its own password, generate a strong password, and manage storage space.
-- **An inbox reader.** Your sign-in mailbox opens automatically during a new login. Other mailboxes unlock with their own password for the current session. Aliases share their destination's connection.
+- **A lightweight inbox.** Read messages and attachments, write a quick reply, or compose a plain-text message. Move mail to Spam or Trash, restore it, and browse Sent. New mail refreshes every 30 seconds while Bucket is open, with unread badges for each address.
 - **Simple administration.** Choose allowed domains, approve people, set limits, review ownership problems, and inspect activity. No public signup.
 - **A comfortable interface.** Light, dark, and system themes; desktop and mobile layouts; keyboard support; and an installable PWA.
 
@@ -50,7 +54,7 @@ You'll need an existing Mailcow installation, Docker with Compose, an HTTPS reve
 
 Create a **read-write administrator API key** in Mailcow under **System → Configuration → Access → Administrators → API**. Restrict it to the source IP Mailcow sees from Bucket. Docker or VPN routing may make that different from the host's IP.
 
-The Bucket container must be able to reach both Mailcow's web API and its TLS IMAP service.
+The Bucket container must be able to reach Mailcow's web API, TLS IMAP service, and SMTP submission service for sending.
 
 ### 2. Configure Bucket
 
@@ -72,7 +76,7 @@ BUCKET_IMAP_PORT=993
 BUCKET_ADMIN_EMAIL=you@example.com
 ```
 
-`BUCKET_MAILCOW_URL` is the **web UI's HTTPS origin**, without `/api/v1`. `BUCKET_IMAP_HOST` is the **mail server's IMAP hostname**. They can be different. Both connections must have valid, trusted TLS certificates.
+`BUCKET_MAILCOW_URL` is the **web UI's HTTPS origin**, without `/api/v1`. `BUCKET_IMAP_HOST` is the **mail server's IMAP hostname**. They can be different. All connections must have valid, trusted TLS certificates. Sending defaults to the IMAP hostname on port 587 with required STARTTLS; use `BUCKET_SMTP_HOST`, `BUCKET_SMTP_PORT`, and `BUCKET_SMTP_SECURITY=tls` for a different server or implicit TLS on port 465.
 
 The administrator email must be a full, existing mailbox address, **not** the Mailcow web administrator username.
 
@@ -102,7 +106,7 @@ That's the infrastructure part done. Everyone else gets to click **Create Alias*
 ## A few things to know
 
 - Login supports locally authenticated Mailcow mailboxes over TLS IMAP. IMAP-enabled app passwords work when your Mailcow policy permits them. Browser SSO and interactive MFA flows aren't implemented.
-- The inbox currently covers **reading INBOX, attachments, and read/unread status**. Sending, replying, other folders, and native Mailcow expiring aliases aren't included yet.
+- Compose and reply use plain text; outgoing attachments, rich text, arbitrary folders, permanent deletion, and native Mailcow expiring aliases are not included. Sending from aliases requires Mailcow’s permission to send as that address.
 - Address filtering relies on recipient and delivery headers. Some Bcc, forwarded, or mailing-list messages can't reliably be attributed to an alias.
 - Bucket manages addresses it creates; it doesn't automatically adopt unrelated accounts already in Mailcow.
 - Mailbox passwords aren't saved. The API key stays on the backend. Message HTML is sanitized, and remote images and scripts are blocked.

@@ -2,9 +2,11 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod inbox;
+mod mail_actions;
 pub mod mailcow;
 pub mod model;
 mod routes;
+pub mod sending;
 mod service;
 use rand::RngCore;
 pub use routes::router;
@@ -20,6 +22,7 @@ pub struct App {
     pub auth: Arc<dyn mailcow::Authenticator>,
     pub writes: Arc<tokio::sync::Mutex<()>>,
     pub inbox: Arc<inbox::Connections>,
+    pub sending: Arc<sending::Sending>,
 }
 impl App {
     pub fn new(config: config::Config) -> error::Result<Self> {
@@ -55,6 +58,7 @@ impl App {
             config,
             writes: Arc::new(tokio::sync::Mutex::new(())),
             inbox: Arc::new(inbox::Connections::default()),
+            sending: Arc::new(sending::Sending::default()),
         })
     }
 }

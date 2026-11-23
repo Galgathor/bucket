@@ -23,7 +23,7 @@ impl Db {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(Error::internal());
         }
         conn.execute_batch("BEGIN IMMEDIATE;
@@ -36,7 +36,8 @@ CREATE INDEX IF NOT EXISTS resource_owner ON resources(owner);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,address TEXT NOT NULL,outcome TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS attempts(key TEXT PRIMARY KEY,count INTEGER NOT NULL,reset INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS preferences(email TEXT PRIMARY KEY,alias_suffix INTEGER NOT NULL DEFAULT 1 CHECK(alias_suffix IN (0,1)));
-PRAGMA user_version=2; COMMIT;")?;
+CREATE TABLE IF NOT EXISTS outgoing(id TEXT PRIMARY KEY,owner TEXT NOT NULL,address TEXT NOT NULL,digest TEXT NOT NULL,status TEXT NOT NULL,message_id TEXT NOT NULL,copy_saved INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL);
+PRAGMA user_version=3; COMMIT;")?;
         Ok(Self(Mutex::new(conn)))
     }
     pub fn with<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
@@ -44,6 +45,48 @@ PRAGMA user_version=2; COMMIT;")?;
             let mut guard = self.0.lock().map_err(|_| Error::internal())?;
             f(&mut guard)
         }
+    }
+    pub fn outgoing(&self, id: &str, owner: &str) -> Result<Option<serde_json::Value>> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT digest,status,message_id,copy_saved FROM outgoing WHERE id=? AND owner=?",
+                params![id, owner],
+                |r| {
+                    Ok(serde_json::json!({
+                        "digest": r.get::<_, String>(0)?,
+                        "status": r.get::<_, String>(1)?,
+                        "message_id": r.get::<_, String>(2)?,
+                        "copy_saved": r.get::<_, bool>(3)?,
+                    }))
+                },
+            )
+            .optional()?)
+        })
+    }
+    pub fn start_outgoing(
+        &self,
+        id: &str,
+        owner: &str,
+        address: &str,
+        digest: &str,
+        message_id: &str,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO outgoing(id,owner,address,digest,status,message_id,created) VALUES(?,?,?,?,'pending',?,?)",
+                params![id, owner, address, digest, message_id, now()],
+            )?;
+            Ok(())
+        })
+    }
+    pub fn finish_outgoing(&self, id: &str, status: &str, copy_saved: bool) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE outgoing SET status=?,copy_saved=? WHERE id=?",
+                params![status, copy_saved, id],
+            )?;
+            Ok(())
+        })
     }
     pub fn alias_suffix(&self, email: &str) -> Result<bool> {
         self.with(|c| {

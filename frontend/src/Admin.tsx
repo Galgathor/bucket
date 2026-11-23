@@ -679,6 +679,8 @@ function ConfirmAction({
 const actionNames: Record<string, string> = {
   login: "Signed in",
   "mail.open": "Opened mailbox",
+  "mail.send": "Sent message",
+  "mail.send.failed": "Message sending failed",
   "login.access_denied": "Sign-in blocked: Bucket access not enabled",
   "login.mailbox_missing": "Sign-in blocked: mailbox not found",
   "login.mailbox_disabled": "Sign-in blocked: mailbox turned off",

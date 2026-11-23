@@ -18,11 +18,13 @@ async fn main() {
     let app = App::new(config.clone()).expect("initialize application database");
     let inbox = app.inbox.clone();
     let database = app.db.clone();
+    let sending = app.sending.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
             inbox.cleanup(&database);
+            sending.cleanup(&database);
         }
     });
     let listener = tokio::net::TcpListener::bind(&config.bind)

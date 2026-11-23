@@ -6,42 +6,39 @@ import {
   Paperclip,
   MailOpen,
   Mail,
+  Reply as ReplyIcon,
+  Send,
+  ShieldAlert,
+  Trash2,
+  Undo2,
 } from "lucide-react";
 import { api, ApiError, space, type Me } from "./api";
 import { Busy, ErrorMessage, InfoButton } from "./components";
 
-type MailAddress = {
-  address: string;
-  mailbox: string;
-  kind: string;
-  name: string;
-  unlocked: boolean;
-};
-type Message = {
-  uid: number;
-  subject: string;
-  from: string;
-  to: string;
-  date: string;
-  read: boolean;
-  size: number;
-};
-type MessageBody = {
-  message: Message;
-  text: string;
-  html: string;
-  attachments: { part: number; name: string; size: number }[];
-};
+import { Compose, type Draft } from "./Compose";
+import {
+  MAIL_REFRESH_MS,
+  type Folder,
+  type MailAddress,
+  type MailMessage as Message,
+  type MessageBody,
+} from "./mail";
 type Page = { messages: Message[]; next: number | null; validity: number };
 export function Inbox({
   me,
   notify,
+  mailStatus,
+  refreshMailStatus,
 }: {
   me: Me;
+  mailStatus: MailAddress[];
+  refreshMailStatus: () => Promise<void>;
   notify: (message: string) => void;
 }) {
   const [addresses, setAddresses] = useState<MailAddress[]>([]);
   const [address, setAddress] = useState(me.email);
+  const [folder, setFolder] = useState<Folder>("inbox");
+  const [composing, setComposing] = useState<Draft | null>();
   const [messages, setMessages] = useState<Message[]>([]);
   const [body, setBody] = useState<MessageBody>();
   const [loading, setLoading] = useState(true);
@@ -63,14 +60,15 @@ export function Inbox({
     setAddresses(result.addresses);
     return result.addresses;
   }
-  async function load(more = false) {
+  async function load(more = false, background = false) {
     const selected = address;
     const seq = ++listSequence.current;
-    setLoading(true);
+    if (!background) setLoading(true);
     setError("");
     try {
       const query = new URLSearchParams({
         address: selected,
+        folder,
         ...(more && next
           ? { before: String(next), validity: String(validity) }
           : {}),
@@ -78,16 +76,27 @@ export function Inbox({
       const result = await api<Page>("/mail/messages?" + query);
       if (current.current !== selected || listSequence.current !== seq) return;
       setMessages((old) =>
-        more
-          ? [
-              ...old,
-              ...result.messages.filter(
-                (m) => !old.some((o) => o.uid === m.uid),
-              ),
-            ]
-          : result.messages,
+        background && old.length > 50 && validity === result.validity
+          ? Array.from(
+              new Map(
+                [...old, ...result.messages].map((m) => [m.uid, m]),
+              ).values(),
+            ).sort((a, b) => b.uid - a.uid)
+          : more
+            ? [
+                ...old,
+                ...result.messages.filter(
+                  (m) => !old.some((o) => o.uid === m.uid),
+                ),
+              ]
+            : result.messages,
       );
-      setNext(result.next);
+      if (!background || messages.length <= 50) setNext(result.next);
+      if (validity && validity !== result.validity) {
+        sequence.current++;
+        setBody(undefined);
+        setReading(false);
+      }
       setValidity(result.validity);
       setLocked(false);
     } catch (e) {
@@ -129,7 +138,35 @@ export function Inbox({
       sequence.current++;
       listSequence.current++;
     };
-  }, [address]);
+  }, [address, folder]);
+  useEffect(() => {
+    if (mailStatus.length) setAddresses(mailStatus);
+  }, [mailStatus]);
+  const pollRef = useRef<() => Promise<void>>(async () => {});
+  pollRef.current = async () => {
+    if (!working && !loading && !reading && !locked) await load(false, true);
+  };
+  useEffect(() => {
+    let pending = false;
+    const poll = async () => {
+      if (document.hidden || pending) return;
+      pending = true;
+      try {
+        await pollRef.current();
+      } finally {
+        pending = false;
+      }
+    };
+    const timer = setInterval(() => void poll(), MAIL_REFRESH_MS);
+    const visible = () => {
+      if (!document.hidden) void poll();
+    };
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, []);
   async function unlock(e: React.FormEvent) {
     e.preventDefault();
     const selected = address;
@@ -140,6 +177,7 @@ export function Inbox({
       if (current.current === selected) {
         setPassword("");
         await loadAddresses();
+        await refreshMailStatus();
         await load();
       }
     } catch (e) {
@@ -152,6 +190,7 @@ export function Inbox({
   function messageQuery(uid: number, part?: number) {
     return new URLSearchParams({
       address,
+      folder,
       uid: String(uid),
       validity: String(validity),
       ...(part !== undefined ? { part: String(part) } : {}),
@@ -172,11 +211,13 @@ export function Inbox({
       if (!message.read) {
         await api("/mail/read", "PUT", {
           address: selected,
+          folder,
           uid: message.uid,
           validity,
           read: true,
         });
         if (current.current === selected && sequence.current === seq) {
+          void refreshMailStatus();
           setMessages((old) =>
             old.map((m) => (m.uid === message.uid ? { ...m, read: true } : m)),
           );
@@ -202,11 +243,13 @@ export function Inbox({
     try {
       await api("/mail/read", "PUT", {
         address: selected,
+        folder,
         uid,
         validity,
         read,
       });
       if (current.current === selected) {
+        void refreshMailStatus();
         setBody((old) =>
           old?.message.uid === uid
             ? { ...old, message: { ...old.message, read } }
@@ -222,12 +265,67 @@ export function Inbox({
       setWorking(false);
     }
   }
+  async function move(destination: Folder) {
+    if (!body) return;
+    setWorking(true);
+    try {
+      await api("/mail/move", "POST", {
+        address,
+        uid: body.message.uid,
+        validity,
+        folder,
+        destination,
+      });
+      sequence.current++;
+      setBody(undefined);
+      setMessages((old) => old.filter((m) => m.uid !== body.message.uid));
+      notify(
+        `Moved to ${destination === "inbox" ? "Inbox" : destination === "spam" ? "Spam" : "Trash"}.`,
+      );
+      await load();
+      await refreshMailStatus();
+    } catch (e) {
+      notify((e as Error).message);
+    } finally {
+      setWorking(false);
+    }
+  }
+  function reply() {
+    if (!body) return;
+    const to =
+      folder === "sent"
+        ? body.message.to
+        : body.message.reply_to || body.message.from;
+    const subject = /^re:/i.test(body.message.subject)
+      ? body.message.subject
+      : "Re: " + body.message.subject;
+    const quote = body.text.slice(0, 10000);
+    setComposing({
+      to,
+      subject,
+      text: quote
+        ? `\n\nOn ${body.message.date}, ${body.message.from} wrote:\n${quote
+            .split("\n")
+            .map((line) => "> " + line)
+            .join("\n")}`
+        : "",
+      reply: { uid: body.message.uid, validity, folder },
+    });
+  }
+  const folderName =
+    folder === "inbox"
+      ? "Inbox"
+      : folder === "spam"
+        ? "Spam"
+        : folder === "trash"
+          ? "Trash"
+          : "Sent";
   return (
     <main className="main inbox-main">
       <div className="page-heading">
         <div>
           <div className="eyebrow">Email</div>
-          <h1>Inbox</h1>
+          <h1>{folderName}</h1>
         </div>
         <div className="inbox-switch">
           <label className="sr-only" htmlFor="inbox-address">
@@ -245,14 +343,36 @@ export function Inbox({
             {addresses.length ? (
               addresses.map((a) => (
                 <option key={a.address} value={a.address}>
+                  {(a.unread ?? 0) > 0 ? "● " : ""}
                   {a.address}
                   {a.kind === "alias" ? " · Alias" : ""}
+                  {(a.unread ?? 0) > 0
+                    ? ` · ${a.unread}${a.unread_limited ? "+" : ""} unread`
+                    : ""}
                 </option>
               ))
             ) : (
               <option>{me.email}</option>
             )}
           </select>
+          {(chosen?.unread ?? 0) > 0 && (
+            <span
+              className="unread-badge"
+              aria-label={`${chosen?.unread} unread messages`}
+            >
+              <Mail size={14} />
+              {chosen?.unread}
+              {chosen?.unread_limited ? "+" : ""}
+            </span>
+          )}
+          <button
+            className="button primary"
+            disabled={locked || loading || chosen?.can_send === false}
+            onClick={() => setComposing(null)}
+          >
+            <Send size={16} />
+            Compose
+          </button>
           <InfoButton label="About address filtering">
             Only messages matching this address in recipient or delivery headers
             are shown. Some Bcc and forwarded messages may not preserve the
@@ -261,6 +381,36 @@ export function Inbox({
         </div>
       </div>
       <section className="inbox-panel" aria-label="Email inbox">
+        <div className="mail-folder-tabs tabs" aria-label="Mail folders">
+          {(["inbox", "spam", "trash", "sent"] as Folder[]).map((item) => (
+            <button
+              key={item}
+              aria-pressed={folder === item}
+              className={folder === item ? "active" : ""}
+              disabled={working}
+              onClick={() => setFolder(item)}
+            >
+              {item === "inbox" ? (
+                <InboxIcon size={16} />
+              ) : item === "spam" ? (
+                <ShieldAlert size={16} />
+              ) : item === "trash" ? (
+                <Trash2 size={16} />
+              ) : (
+                <Send size={16} />
+              )}
+              <span>
+                {item === "inbox"
+                  ? "Inbox"
+                  : item === "spam"
+                    ? "Spam"
+                    : item === "trash"
+                      ? "Trash"
+                      : "Sent"}
+              </span>
+            </button>
+          ))}
+        </div>
         <div className="inbox-toolbar">
           <span>
             <InboxIcon size={17} />
@@ -275,6 +425,7 @@ export function Inbox({
               setReading(false);
               setBody(undefined);
               void load();
+              void refreshMailStatus();
             }}
           >
             <RefreshCw size={17} className={loading ? "spin" : ""} />
@@ -400,20 +551,63 @@ export function Inbox({
                       </p>
                       <p>{body.message.date}</p>
                     </div>
-                    <button
-                      className="icon-button"
-                      disabled={working}
-                      aria-label={
-                        body.message.read ? "Mark unread" : "Mark read"
-                      }
-                      onClick={() => void toggleRead()}
-                    >
-                      {body.message.read ? (
-                        <Mail size={18} />
-                      ) : (
-                        <MailOpen size={18} />
+                    <div className="message-actions">
+                      <button
+                        className="button secondary small"
+                        disabled={working || chosen?.can_send === false}
+                        onClick={reply}
+                      >
+                        <ReplyIcon size={15} />
+                        Reply
+                      </button>
+                      {folder !== "spam" && (
+                        <button
+                          className="icon-button"
+                          disabled={working}
+                          aria-label="Move to Spam"
+                          title="Move to Spam"
+                          onClick={() => void move("spam")}
+                        >
+                          <ShieldAlert size={18} />
+                        </button>
                       )}
-                    </button>
+                      {folder !== "trash" && (
+                        <button
+                          className="icon-button"
+                          disabled={working}
+                          aria-label="Move to Trash"
+                          title="Move to Trash"
+                          onClick={() => void move("trash")}
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      )}
+                      {(folder === "spam" || folder === "trash") && (
+                        <button
+                          className="icon-button"
+                          disabled={working}
+                          aria-label="Move to Inbox"
+                          title="Move to Inbox"
+                          onClick={() => void move("inbox")}
+                        >
+                          <Undo2 size={18} />
+                        </button>
+                      )}
+                      <button
+                        className="icon-button"
+                        disabled={working}
+                        aria-label={
+                          body.message.read ? "Mark unread" : "Mark read"
+                        }
+                        onClick={() => void toggleRead()}
+                      >
+                        {body.message.read ? (
+                          <Mail size={18} />
+                        ) : (
+                          <MailOpen size={18} />
+                        )}
+                      </button>
+                    </div>
                   </div>
                   {body.html ? (
                     <iframe
@@ -461,6 +655,31 @@ export function Inbox({
           </div>
         )}
       </section>
+      {composing !== undefined && (
+        <Compose
+          address={
+            chosen ?? {
+              address,
+              mailbox: address,
+              kind: "mailbox",
+              name: "",
+              unlocked: true,
+            }
+          }
+          initial={composing ?? undefined}
+          onClose={() => setComposing(undefined)}
+          onSent={(copySaved) => {
+            setComposing(undefined);
+            notify(
+              copySaved
+                ? "Message sent."
+                : "Message sent. A copy could not be saved to Sent.",
+            );
+            void load(false, true);
+            void refreshMailStatus();
+          }}
+        />
+      )}
     </main>
   );
 }

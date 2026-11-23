@@ -18,6 +18,7 @@ import { Busy, ErrorMessage, InfoButton } from "./components";
 import { Dashboard } from "./Dashboard";
 import { Admin } from "./Admin";
 import { Inbox } from "./Inbox";
+import { useMailStatus } from "./useMailStatus";
 import "./style.css";
 
 type InstallEvent = Event & {
@@ -26,6 +27,7 @@ type InstallEvent = Event & {
 };
 function App() {
   const [me, setMe] = useState<Me>();
+  const { mailStatus, refreshMailStatus } = useMailStatus(me?.email);
   const [initial, setInitial] = useState(true);
   const [initialError, setInitialError] = useState("");
   const [page, setPage] = useState("addresses");
@@ -158,10 +160,14 @@ function App() {
               </button>
               <button
                 className={page === "inbox" ? "active" : ""}
+                aria-label="Inbox"
                 onClick={() => setPage("inbox")}
               >
                 <Mail size={17} />
                 <span>Inbox</span>
+                {mailStatus.some((a) => (a.unread ?? 0) > 0) && (
+                  <span className="nav-unread" aria-label="Unread email" />
+                )}
               </button>
               {me.admin && (
                 <button
@@ -285,12 +291,19 @@ function App() {
         page === "settings" && me.admin ? (
           <Admin refreshMe={refreshMe} notify={notify} />
         ) : page === "inbox" ? (
-          <Inbox key={me.email} me={me} notify={notify} />
+          <Inbox
+            key={me.email}
+            me={me}
+            notify={notify}
+            mailStatus={mailStatus}
+            refreshMailStatus={refreshMailStatus}
+          />
         ) : (
           <Dashboard
             key={me.email}
             me={me}
             refreshMe={refreshMe}
+            mailStatus={mailStatus}
             notify={notify}
           />
         )

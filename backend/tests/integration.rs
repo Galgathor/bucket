@@ -75,7 +75,7 @@ async fn mailcow(
         }
         ["add", "alias"] => {
             let id = r.aliases.len() + 1;
-            r.aliases.insert(body["address"].as_str().unwrap().into(),json!({"address":body["address"],"id":id,"goto":body["goto"],"private_comment":body["private_comment"],"active":1,"created":"2026-11-22 12:00:00"}));
+            r.aliases.insert(body["address"].as_str().unwrap().into(),json!({"address":body["address"],"id":id,"goto":body["goto"],"sender_allowed":body["sender_allowed"],"private_comment":body["private_comment"],"active":1,"created":"2026-11-22 12:00:00"}));
         }
         ["edit", kind] => {
             let id = body["items"][0].as_str().unwrap();
@@ -161,6 +161,9 @@ impl Fixture {
             api_key: "test-api-key-only".into(),
             imap_host: "localhost".into(),
             imap_port: 993,
+            smtp_host: "localhost".into(),
+            smtp_port: 1,
+            smtp_starttls: false,
             admin: "admin@example.com".into(),
             database: dir.path().join("bucket.db").to_string_lossy().into(),
             frontend: dir.path().to_string_lossy().into(),
@@ -1031,12 +1034,23 @@ impl Authenticator for InboxAuth {
         .unwrap()
     }
 }
+#[derive(Default)]
+struct ImapProbe {
+    stores: Arc<AtomicUsize>,
+    moves: Mutex<Vec<(String, String)>>,
+    sent: Mutex<Vec<Vec<u8>>>,
+    fail_append: std::sync::atomic::AtomicBool,
+}
 fn inbox_server() -> (u16, Arc<AtomicUsize>) {
-    use std::io::{BufRead, BufReader, Write};
+    let (port, probe) = inbox_server_probe();
+    (port, probe.stores.clone())
+}
+fn inbox_server_probe() -> (u16, Arc<ImapProbe>) {
+    use std::io::{BufRead, BufReader, Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let stores = Arc::new(AtomicUsize::new(0));
-    let changes = stores.clone();
+    let probe = Arc::new(ImapProbe::default());
+    let state = probe.clone();
     std::thread::spawn(move || {
         let identity = native_tls::Identity::from_pkcs8(
             include_bytes!("fixtures/imap-cert.pem"),
@@ -1051,51 +1065,160 @@ fn inbox_server() -> (u16, Arc<AtomicUsize>) {
         let mut stream = tls.accept(stream).unwrap();
         stream.write_all(b"* OK test IMAP ready\r\n").unwrap();
         let mut reader = BufReader::new(stream);
-        let header = "From: =?UTF-8?B?Sm9zw6k=?= <sender@example.net>\r\nTo: shop@example.com\r\nSubject: Receipt\r\nDate: Mon, 23 Nov 2026 12:00:00 +0000\r\nX-Original-To: shop@example.com\r\n";
+        let header = "From: =?UTF-8?B?Sm9zw6k=?= <sender@example.net>\r\nReply-To: reply@example.net\r\nMessage-ID: <original@example.net>\r\nTo: shop@example.com\r\nSubject: Receipt\r\nDate: Mon, 23 Nov 2026 12:00:00 +0000\r\nX-Original-To: shop@example.com\r\n";
         let other = "From: someone@example.net\r\nTo: not-shop@example.com\r\nSubject: Not your selected alias\r\nX-Original-To: not-shop@example.com\r\n";
         let body = format!(
             "{header}MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=abc\r\n\r\n--abc\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello from the inbox.\r\n--abc\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=receipt.txt\r\n\r\nPaid\r\n--abc--\r\n"
         );
+        let mut seen = false;
+        let mut selected = "INBOX".to_string();
+        let mut folders = HashMap::from([
+            ("INBOX".to_string(), vec![1u32, 2]),
+            ("Junk".to_string(), vec![]),
+            ("Trash".to_string(), vec![]),
+            ("Sent".to_string(), vec![]),
+        ]);
         let mut line = String::new();
         while reader.read_line(&mut line).unwrap_or(0) > 0 {
             let tag = line.split_whitespace().next().unwrap().to_string();
             let command = line.to_uppercase();
+            if command.contains(" APPEND ") {
+                if state.fail_append.load(Ordering::SeqCst) {
+                    let _ = write!(reader.get_mut(), "{tag} NO cannot append\r\n");
+                    line.clear();
+                    continue;
+                }
+                let size = line
+                    .rsplit('{')
+                    .next()
+                    .unwrap()
+                    .split('}')
+                    .next()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                write!(reader.get_mut(), "+ ready\r\n").unwrap();
+                let mut bytes = vec![0; size];
+                reader.read_exact(&mut bytes).unwrap();
+                let mut suffix = [0; 2];
+                reader.read_exact(&mut suffix).unwrap();
+                let mut sent = state.sent.lock().unwrap();
+                let uid = 100 + sent.len() as u32;
+                sent.push(bytes);
+                folders.get_mut("Sent").unwrap().push(uid);
+                let _ = write!(
+                    reader.get_mut(),
+                    "{tag} OK [APPENDUID 42 {uid}] appended\r\n"
+                );
+                line.clear();
+                continue;
+            }
             let stream = reader.get_mut();
             let result = if command.contains(" LOGIN ") {
-                if line.contains("mail-password") {
-                    write!(stream, "{tag} OK logged in\r\n")
-                } else {
-                    write!(stream, "{tag} NO rejected\r\n")
-                }
-            } else if command.contains(" SELECT ") {
                 write!(
                     stream,
-                    "* FLAGS (\\Seen)\r\n* 2 EXISTS\r\n* OK [UIDVALIDITY 42] stable\r\n* OK [UIDNEXT 3] next\r\n{tag} OK [READ-WRITE] selected\r\n"
+                    "{tag} {}\r\n",
+                    if line.contains("mail-password") {
+                        "OK logged in"
+                    } else {
+                        "NO rejected"
+                    }
+                )
+            } else if command.contains(" LIST ") {
+                write!(
+                    stream,
+                    "* LIST (\\Junk) \"/\" \"Junk\"\r\n* LIST (\\Trash) \"/\" \"Trash\"\r\n* LIST (\\Sent) \"/\" \"Sent\"\r\n{tag} OK listed\r\n"
+                )
+            } else if command.contains(" SELECT ") {
+                selected = line
+                    .split_once(" SELECT ")
+                    .unwrap()
+                    .1
+                    .trim()
+                    .trim_matches('"')
+                    .into();
+                let count = folders.get(&selected).map_or(0, Vec::len);
+                let next = if selected == "Sent" {
+                    100 + state.sent.lock().unwrap().len() as u32
+                } else {
+                    3
+                };
+                write!(
+                    stream,
+                    "* FLAGS (\\Seen)\r\n* {count} EXISTS\r\n* OK [UIDVALIDITY 42] stable\r\n* OK [UIDNEXT {next}] next\r\n{tag} OK [READ-WRITE] selected\r\n"
                 )
             } else if command.contains(" UID SEARCH ") {
-                write!(stream, "* SEARCH 1 2\r\n{tag} OK search\r\n")
+                let ids = folders
+                    .get(&selected)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|id| !command.contains("UNSEEN") || (*id < 100 && (*id != 1 || !seen)))
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                write!(stream, "* SEARCH {ids}\r\n{tag} OK search\r\n")
             } else if command.contains(" UID FETCH ") {
                 let set = line.split_whitespace().nth(3).unwrap();
-                let header_request = command.contains("BODY.PEEK[HEADER]");
-                if header_request {
-                    for (uid, data) in [(1, header), (2, other)] {
-                        if set.split(',').any(|s| s == uid.to_string()) {
-                            write!(stream,"* {uid} FETCH (UID {uid} FLAGS () RFC822.SIZE {} BODY[HEADER]<0> {{{}}}\r\n{data})\r\n",body.len(),data.len()).unwrap();
-                        }
-                    }
-                } else {
-                    write!(
-                        stream,
-                        "* 1 FETCH (UID 1 BODY[]<0> {{{}}}\r\n{})\r\n",
-                        body.len(),
-                        body
-                    )
-                    .unwrap();
+                let ids = folders.get(&selected).cloned().unwrap_or_default();
+                for uid in ids
+                    .into_iter()
+                    .filter(|uid| set.split(',').any(|s| s == uid.to_string()))
+                {
+                    let raw = if uid >= 100 {
+                        state.sent.lock().unwrap()[(uid - 100) as usize].clone()
+                    } else if uid == 1 {
+                        body.as_bytes().to_vec()
+                    } else {
+                        format!("{other}\r\nOther").into_bytes()
+                    };
+                    let end = raw
+                        .windows(4)
+                        .position(|w| w == b"\r\n\r\n")
+                        .map(|p| p + 4)
+                        .unwrap_or(raw.len());
+                    let data = if command.contains("BODY.PEEK[HEADER]") {
+                        &raw[..end]
+                    } else {
+                        &raw[..]
+                    };
+                    let section = if command.contains("BODY.PEEK[HEADER]") {
+                        "HEADER"
+                    } else {
+                        ""
+                    };
+                    let flags = if (uid == 1 && seen) || uid >= 100 {
+                        "\\Seen"
+                    } else {
+                        ""
+                    };
+                    write!(stream,"* {uid} FETCH (UID {uid} FLAGS ({flags}) RFC822.SIZE {} BODY[{section}]<0> {{{}}}\r\n",raw.len(),data.len()).unwrap();
+                    stream.write_all(data).unwrap();
+                    stream.write_all(b")\r\n").unwrap();
                 }
                 write!(stream, "{tag} OK fetched\r\n")
             } else if command.contains(" UID STORE ") {
-                changes.fetch_add(1, Ordering::SeqCst);
+                seen = !command.contains("-FLAGS");
+                state.stores.fetch_add(1, Ordering::SeqCst);
                 write!(stream, "{tag} OK stored\r\n")
+            } else if command.contains(" UID MOVE ") {
+                let destination = line
+                    .splitn(6, ' ')
+                    .last()
+                    .unwrap()
+                    .trim()
+                    .trim_matches('"')
+                    .to_string();
+                folders.get_mut(&selected).unwrap().retain(|id| *id != 1);
+                folders.entry(destination.clone()).or_default().push(1);
+                state
+                    .moves
+                    .lock()
+                    .unwrap()
+                    .push((selected.clone(), destination));
+                write!(stream, "{tag} OK moved\r\n")
+            } else if command.contains(" NOOP") {
+                write!(stream, "{tag} OK alive\r\n")
             } else if command.contains(" LOGOUT") {
                 let _ = write!(stream, "* BYE logout\r\n{tag} OK logout\r\n");
                 break;
@@ -1108,8 +1231,9 @@ fn inbox_server() -> (u16, Arc<AtomicUsize>) {
             line.clear();
         }
     });
-    (port, stores)
+    (port, probe)
 }
+
 #[tokio::test]
 async fn inbox_alias_filter_read_flags_attachments_and_authorization() {
     let mut f = Fixture::new().await;
@@ -1265,10 +1389,12 @@ fn recipient_filter_is_exact_and_html_cannot_load_remote_content() {
 }
 
 #[tokio::test]
-async fn signing_in_opens_primary_inbox_without_storing_a_password() {
+async fn signing_in_opens_primary_inbox_and_sending_without_storing_a_password() {
     let mut f = Fixture::new().await;
     let (port, _) = inbox_server();
     f.app.auth = Arc::new(InboxAuth { port });
+    let (smtp_port, smtp) = smtp_server(SmtpMode::Accept, false);
+    smtp_config(&mut f, smtp_port, false, true);
     let (status, value, headers) = f
         .call(
             "POST",
@@ -1294,6 +1420,18 @@ async fn signing_in_opens_primary_inbox_without_storing_a_password() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(addresses["addresses"][0]["unlocked"], true);
+    assert_eq!(addresses["addresses"][0]["sending_unlocked"], true);
+    let mut message = draft('e');
+    message["address"] = json!("alice@example.com");
+    message.as_object_mut().unwrap().remove("password");
+    assert_eq!(
+        f.call("POST", "/api/mail/send", Some(&session), Some(message))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(smtp.auth.load(Ordering::SeqCst), 1);
+    assert_eq!(smtp.messages.lock().unwrap().len(), 1);
     let mut invalid = session.clone();
     invalid.1 = "wrong".into();
     assert_eq!(
@@ -1309,4 +1447,545 @@ async fn signing_in_opens_primary_inbox_without_storing_a_password() {
     );
     let audit = serde_json::to_string(&f.app.db.audits().unwrap()).unwrap();
     assert!(!audit.contains("mail-password"));
+    let saved_session = f.app.db.session(&hash(&session.0)).unwrap().unwrap();
+    assert!(
+        f.app
+            .sending
+            .opened(&saved_session, "alice@example.com", &saved_session.identity)
+    );
+    assert_eq!(
+        f.call("POST", "/api/logout", Some(&session), None).await.0,
+        StatusCode::OK
+    );
+    assert!(
+        !f.app
+            .sending
+            .opened(&saved_session, "alice@example.com", &saved_session.identity)
+    );
+}
+
+#[derive(Clone, Copy)]
+enum SmtpMode {
+    Accept,
+    RejectRecipient,
+    DropAfterData,
+}
+#[derive(Default)]
+struct SmtpProbe {
+    messages: Mutex<Vec<Vec<u8>>>,
+    auth: AtomicUsize,
+    starttls: std::sync::atomic::AtomicBool,
+}
+fn smtp_server(mode: SmtpMode, starttls: bool) -> (u16, Arc<SmtpProbe>) {
+    use base64::Engine;
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let probe = Arc::new(SmtpProbe::default());
+    let state = probe.clone();
+    std::thread::spawn(move || {
+        let identity = native_tls::Identity::from_pkcs8(
+            include_bytes!("fixtures/imap-cert.pem"),
+            include_bytes!("fixtures/imap-key.pem"),
+        )
+        .unwrap();
+        let tls = native_tls::TlsAcceptor::new(identity).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(4)))
+            .unwrap();
+        let mut stream = if starttls {
+            let mut plain = BufReader::new(stream);
+            plain
+                .get_mut()
+                .write_all(b"220 localhost ready\r\n")
+                .unwrap();
+            let mut line = String::new();
+            if plain.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            assert!(line.starts_with("EHLO"));
+            plain
+                .get_mut()
+                .write_all(b"250-localhost\r\n250 STARTTLS\r\n")
+                .unwrap();
+            line.clear();
+            if plain.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            assert_eq!(line.trim(), "STARTTLS");
+            plain.get_mut().write_all(b"220 begin TLS\r\n").unwrap();
+            state.starttls.store(true, Ordering::SeqCst);
+            let Ok(stream) = tls.accept(plain.into_inner()) else {
+                return;
+            };
+            stream
+        } else {
+            let Ok(mut stream) = tls.accept(stream) else {
+                return;
+            };
+            stream.write_all(b"220 localhost ready\r\n").unwrap();
+            stream
+        };
+        stream.flush().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            let upper = line.to_uppercase();
+            if upper.starts_with("DATA") {
+                reader.get_mut().write_all(b"354 send content\r\n").unwrap();
+                let mut data = vec![];
+                loop {
+                    let mut part = vec![];
+                    if reader.read_until(b'\n', &mut part).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if part == b".\r\n" {
+                        break;
+                    }
+                    if part.starts_with(b"..") {
+                        part.remove(0);
+                    }
+                    data.extend(part);
+                }
+                state.messages.lock().unwrap().push(data);
+                if matches!(mode, SmtpMode::DropAfterData) {
+                    return;
+                }
+                reader.get_mut().write_all(b"250 accepted\r\n").unwrap();
+                line.clear();
+                continue;
+            }
+            let response: &[u8] = if upper.starts_with("EHLO") {
+                b"250-localhost\r\n250-8BITMIME\r\n250 AUTH PLAIN LOGIN\r\n".as_slice()
+            } else if upper.starts_with("AUTH PLAIN ") {
+                state.auth.fetch_add(1, Ordering::SeqCst);
+                let raw = base64::engine::general_purpose::STANDARD
+                    .decode(line.split_whitespace().nth(2).unwrap())
+                    .unwrap();
+                if raw.ends_with(b"\0mail-password") {
+                    b"235 authenticated\r\n"
+                } else {
+                    b"535 rejected\r\n"
+                }
+            } else if upper.starts_with("MAIL FROM:") {
+                b"250 sender ok\r\n"
+            } else if upper.starts_with("RCPT TO:") {
+                if matches!(mode, SmtpMode::RejectRecipient) {
+                    b"550 recipient rejected\r\n"
+                } else {
+                    b"250 recipient ok\r\n"
+                }
+            } else if upper.starts_with("NOOP") || upper.starts_with("RSET") {
+                b"250 alive\r\n"
+            } else if upper.starts_with("QUIT") {
+                let _ = reader.get_mut().write_all(b"221 bye\r\n");
+                break;
+            } else {
+                b"500 unsupported\r\n"
+            };
+            if reader.get_mut().write_all(response).is_err() {
+                break;
+            }
+            line.clear();
+        }
+    });
+    (port, probe)
+}
+fn smtp_config(f: &mut Fixture, port: u16, starttls: bool, trust: bool) {
+    let mut config = (*f.app.config).clone();
+    config.smtp_host = "localhost".into();
+    config.smtp_port = port;
+    config.smtp_starttls = starttls;
+    if trust {
+        config.ca_cert = Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/imap-cert.pem")
+                .to_string_lossy()
+                .into(),
+        );
+    }
+    f.app.config = Arc::new(config);
+}
+async fn open_fixture_mailbox(f: &mut Fixture) -> ((String, String), Arc<ImapProbe>) {
+    let user = f.session("alice@example.com");
+    let (port, probe) = inbox_server_probe();
+    f.app.auth = Arc::new(InboxAuth { port });
+    f.alias(&user, "shop").await;
+    assert_eq!(
+        f.call(
+            "POST",
+            "/api/mail/unlock",
+            Some(&user),
+            Some(json!({"address":"shop@example.com","password":"mail-password"}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    (user, probe)
+}
+fn draft(id: char) -> Value {
+    json!({"id":id.to_string().repeat(32),"address":"shop@example.com","to":"reply+tag@example.net","subject":"Hello","text":"A private test message.\n.Line two","password":"mail-password"})
+}
+#[tokio::test]
+async fn sending_uses_verified_starttls_authorized_alias_and_is_idempotent() {
+    let mut f = Fixture::new().await;
+    let (user, imap) = open_fixture_mailbox(&mut f).await;
+    let (port, smtp) = smtp_server(SmtpMode::Accept, true);
+    smtp_config(&mut f, port, true, true);
+    let input = draft('a');
+    let (status, response, _) = f
+        .call("POST", "/api/mail/send", Some(&user), Some(input.clone()))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["sent"], true);
+    assert_eq!(response["copy_saved"], true);
+    assert!(smtp.starttls.load(Ordering::SeqCst));
+    assert_eq!(smtp.auth.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        f.call("POST", "/api/mail/send", Some(&user), Some(input.clone()))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(smtp.messages.lock().unwrap().len(), 1);
+    assert_eq!(imap.sent.lock().unwrap().len(), 1);
+    let raw = smtp.messages.lock().unwrap()[0].clone();
+    let mail = mailparse::parse_mail(&raw).unwrap();
+    use mailparse::MailHeaderMap;
+    assert_eq!(
+        mail.headers.get_first_value("From").unwrap(),
+        "shop@example.com"
+    );
+    assert!(mail.get_body().unwrap().contains("\n.Line two"));
+    let mut changed = input.clone();
+    changed["text"] = json!("changed");
+    assert_eq!(
+        f.call("POST", "/api/mail/send", Some(&user), Some(changed))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let mut reply = draft('b');
+    reply["reply"] = json!({"uid":1,"validity":42,"folder":"inbox"});
+    reply.as_object_mut().unwrap().remove("password");
+    let (status, response, _) = f
+        .call("POST", "/api/mail/send", Some(&user), Some(reply))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    {
+        let messages = smtp.messages.lock().unwrap();
+        let reply = mailparse::parse_mail(&messages[1]).unwrap();
+        assert_eq!(
+            reply.headers.get_first_value("In-Reply-To").unwrap(),
+            "<original@example.net>"
+        );
+        assert_eq!(messages.len(), 2);
+    }
+    let (status, sent, _) = f
+        .call(
+            "GET",
+            "/api/mail/messages?address=shop%40example.com&folder=sent",
+            Some(&user),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    assert_eq!(sent["messages"].as_array().unwrap().len(), 2);
+    for (uid, validity, expected) in [
+        (2, 42, StatusCode::NOT_FOUND),
+        (1, 43, StatusCode::CONFLICT),
+    ] {
+        let mut invalid_reply = draft('c');
+        invalid_reply.as_object_mut().unwrap().remove("password");
+        invalid_reply["reply"] = json!({"uid":uid,"validity":validity,"folder":"inbox"});
+        assert_eq!(
+            f.call("POST", "/api/mail/send", Some(&user), Some(invalid_reply))
+                .await
+                .0,
+            expected
+        );
+    }
+    let mut invalid = draft('c');
+    invalid["address"] = json!("bob@example.com");
+    assert_eq!(
+        f.call("POST", "/api/mail/send", Some(&user), Some(invalid))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    f.mock
+        .0
+        .lock()
+        .unwrap()
+        .aliases
+        .get_mut("shop@example.com")
+        .unwrap()["sender_allowed"] = json!(0);
+    assert_eq!(
+        f.call("POST", "/api/mail/send", Some(&user), Some(draft('d')))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(smtp.messages.lock().unwrap().len(), 2);
+    let audit = serde_json::to_string(&f.app.db.audits().unwrap()).unwrap();
+    assert!(!audit.contains("A private test message"));
+    assert!(!audit.contains("mail-password"));
+}
+#[tokio::test]
+async fn delivery_uncertainty_never_automatically_resends() {
+    let mut f = Fixture::new().await;
+    let (user, _) = open_fixture_mailbox(&mut f).await;
+    let (port, smtp) = smtp_server(SmtpMode::DropAfterData, false);
+    smtp_config(&mut f, port, false, true);
+    let input = draft('e');
+    assert_eq!(
+        f.call("POST", "/api/mail/send", Some(&user), Some(input.clone()))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        f.call("POST", "/api/mail/send", Some(&user), Some(input))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(smtp.messages.lock().unwrap().len(), 1);
+    assert_eq!(
+        f.app
+            .db
+            .outgoing(&"e".repeat(32), "alice@example.com")
+            .unwrap()
+            .unwrap()["status"],
+        "pending"
+    );
+}
+#[tokio::test]
+async fn sent_copy_failure_is_still_a_successful_send() {
+    let mut f = Fixture::new().await;
+    let (user, imap) = open_fixture_mailbox(&mut f).await;
+    imap.fail_append.store(true, Ordering::SeqCst);
+    let (port, smtp) = smtp_server(SmtpMode::Accept, false);
+    smtp_config(&mut f, port, false, true);
+    let input = draft('f');
+    let (status, response, _) = f
+        .call("POST", "/api/mail/send", Some(&user), Some(input.clone()))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["copy_saved"], false);
+    assert_eq!(
+        f.call("POST", "/api/mail/send", Some(&user), Some(input))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(smtp.messages.lock().unwrap().len(), 1);
+}
+#[tokio::test]
+async fn smtp_rejection_and_untrusted_certificates_are_not_success() {
+    for (mode, trust, expected) in [
+        (
+            SmtpMode::RejectRecipient,
+            true,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (SmtpMode::Accept, false, StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        let mut f = Fixture::new().await;
+        let (user, _) = open_fixture_mailbox(&mut f).await;
+        let (port, smtp) = smtp_server(mode, false);
+        smtp_config(&mut f, port, false, trust);
+        let (status, response, _) = f
+            .call("POST", "/api/mail/send", Some(&user), Some(draft('1')))
+            .await;
+        assert_eq!(status, expected, "{response}");
+        assert!(smtp.messages.lock().unwrap().is_empty());
+    }
+}
+#[tokio::test]
+async fn unread_counts_are_exact_and_spam_trash_moves_are_scoped_and_reversible() {
+    let mut f = Fixture::new().await;
+    let (user, imap) = open_fixture_mailbox(&mut f).await;
+    let (status, value, _) = f.call("GET", "/api/mail/status", Some(&user), None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let rows = value["addresses"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r["address"] == "shop@example.com")
+            .unwrap()["unread"],
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|r| r["address"] == "alice@example.com")
+            .unwrap()["unread"],
+        0
+    );
+    let input = |folder: &str, dest: &str| json!({"address":"shop@example.com","uid":1,"validity":42,"folder":folder,"destination":dest});
+    let mut bad = user.clone();
+    bad.1 = "wrong".into();
+    assert_eq!(
+        f.call(
+            "POST",
+            "/api/mail/move",
+            Some(&bad),
+            Some(input("inbox", "spam"))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, response, _) = f
+        .call(
+            "POST",
+            "/api/mail/move",
+            Some(&user),
+            Some(input("inbox", "spam")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(
+        f.call(
+            "GET",
+            "/api/mail/messages?address=shop%40example.com&folder=inbox",
+            Some(&user),
+            None
+        )
+        .await
+        .1["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        f.call(
+            "GET",
+            "/api/mail/messages?address=shop%40example.com&folder=spam",
+            Some(&user),
+            None
+        )
+        .await
+        .1["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        f.call(
+            "POST",
+            "/api/mail/move",
+            Some(&user),
+            Some(input("spam", "trash"))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        f.call(
+            "POST",
+            "/api/mail/move",
+            Some(&user),
+            Some(input("trash", "inbox"))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(imap.moves.lock().unwrap().len(), 3);
+    let mut invalid = input("inbox", "trash");
+    invalid["uid"] = json!(2);
+    assert_eq!(
+        f.call("POST", "/api/mail/move", Some(&user), Some(invalid))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        f.call(
+            "GET",
+            "/api/mail/messages?address=shop%40example.com&folder=arbitrary",
+            Some(&user),
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn sending_validates_inputs_csrf_and_rate_limits_before_submission() {
+    let f = Fixture::new().await;
+    let user = f.session("alice@example.com");
+    let mut input = draft('f');
+    input["address"] = json!("alice@example.com");
+    let bad_csrf = (user.0.clone(), "wrong".into());
+    assert_eq!(
+        f.call(
+            "POST",
+            "/api/mail/send",
+            Some(&bad_csrf),
+            Some(input.clone())
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        f.call("POST", "/api/mail/send", None, Some(input.clone()))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    for (field, value) in [
+        ("subject", "Hello\r\nBcc: stranger@example.net"),
+        ("to", "friend@example.net\r\nBcc: stranger@example.net"),
+        ("to", "Friends: a@example.net;"),
+        ("text", "   "),
+        ("id", "short"),
+    ] {
+        let mut invalid = input.clone();
+        invalid[field] = json!(value);
+        assert_eq!(
+            f.call("POST", "/api/mail/send", Some(&user), Some(invalid))
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{field}"
+        );
+    }
+    let mut oversized = input.clone();
+    oversized["text"] = json!("a".repeat(65 * 1024));
+    assert_eq!(
+        f.call("POST", "/api/mail/send", Some(&user), Some(oversized))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for _ in 0..20 {
+        assert!(
+            f.app
+                .db
+                .limit(&format!("send:{}", hash("alice@example.com")), 20, 300)
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        f.call("POST", "/api/mail/send", Some(&user), Some(input))
+            .await
+            .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        f.app
+            .db
+            .with(|c| Ok(c.query_row("SELECT count(*) FROM outgoing", [], |r| r.get::<_, i64>(0))?))
+            .unwrap(),
+        0
+    );
 }
