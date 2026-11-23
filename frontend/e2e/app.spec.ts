@@ -273,6 +273,7 @@ test("create an alias through name, address, forwarding and review", async ({
   await expect(
     page.getByRole("dialog").getByText("receipts@example.com", { exact: true }),
   ).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath("alias-review.png") });
   expect(
     requests.some((r) => r.path === "/api/addresses" && r.body.local),
   ).toBe(false);
