@@ -15,6 +15,7 @@ export type Me = {
   domains: string[];
   policy: Policy;
   destinations: string[];
+  alias_suffix: boolean;
 };
 export type Address = {
   id: number;
@@ -131,4 +132,24 @@ export function space(bytes: number): string {
   if (bytes >= 1073741824)
     return `${(bytes / 1073741824).toFixed(bytes % 1073741824 === 0 ? 0 : 1)} GB`;
   return `${Math.ceil(bytes / 1048576)} MB`;
+}
+
+export function aliasBase(name: string): string {
+  return name
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+export function aliasSuffix(): string {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  while (result.length < 3) {
+    for (const b of crypto.getRandomValues(new Uint8Array(8))) {
+      if (b < 252) result += alphabet[b % 36];
+      if (result.length === 3) break;
+    }
+  }
+  return result;
 }

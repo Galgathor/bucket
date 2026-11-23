@@ -193,3 +193,9 @@ pub struct Session {
     pub expires: i64,
     pub identity: String,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Preferences {
+    pub alias_suffix: bool,
+}

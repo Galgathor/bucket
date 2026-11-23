@@ -1588,3 +1588,93 @@ input[role="switch"]:checked:after {
     scroll-behavior: auto !important;
   }
 }
+.creation-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.alias-steps {
+  display: flex;
+  list-style: none;
+  gap: 20px;
+  padding: 0 0 16px;
+  margin: 0 0 22px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.alias-steps .current {
+  color: var(--accent);
+}
+.alias-steps [aria-current="step"] {
+  font-weight: 600;
+}
+.alias-address {
+  margin-top: 8px;
+}
+.alias-address .alias-suffix {
+  color: var(--text);
+  font-size: 0.9rem;
+  white-space: nowrap;
+  margin-right: 6px;
+}
+.alias-address input {
+  width: 35%;
+  flex: 1;
+}
+.alias-preview {
+  overflow-wrap: anywhere;
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin-top: 18px;
+}
+.alias-review {
+  margin: 0;
+}
+.alias-review > div {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.alias-review dt {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.alias-review dd {
+  margin: 0;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+.alias-footer {
+  flex-wrap: wrap;
+}
+.alias-footer .back-button {
+  margin-right: auto;
+}
+.alias-footer .button {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+@media (max-width: 600px) {
+  .page-heading:has(.creation-actions) {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .creation-actions {
+    width: 100%;
+  }
+  .creation-actions > .button {
+    flex: 1;
+  }
+  .alias-footer {
+    gap: 8px;
+  }
+  .alias-footer .back-button {
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+  .alias-steps {
+    gap: 16px;
+  }
+}

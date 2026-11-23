@@ -2,7 +2,7 @@
 
 A self-hosted email address manager for an existing Mailcow server. Rust (Axum), React, and SQLite, served by one container.
 
-People sign in with their existing mailbox credentials, create a mailbox or alias, and manage addresses they own. Bucket includes light/dark/system themes, mobile layouts, installable PWA support, and a separate administrator interface.
+People sign in with their existing mailbox credentials, use **Create Mailbox** or **Create Alias**, and manage addresses they own. Alias creation starts with a name, suggests a matching address, and lets people choose a destination and optionally review before creating. The three-character random suffix preference is saved per person. Bucket includes light/dark/system themes, mobile layouts, installable PWA support, and a separate administrator interface.
 
 ## Deploy with Docker Compose
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generatePassword, randomLocal } from "./api";
+import { generatePassword, randomLocal, aliasBase, aliasSuffix } from "./api";
 describe("Generated credentials", () => {
   it("generates distinct strong passwords using browser cryptography", () => {
     const passwords = Array.from({ length: 100 }, generatePassword);
@@ -16,5 +16,16 @@ describe("Generated credentials", () => {
     const names = Array.from({ length: 100 }, randomLocal);
     expect(new Set(names).size).toBe(100);
     expect(names.every((n) => /^[a-z0-9]{16}$/.test(n))).toBe(true);
+  });
+});
+
+describe("Named aliases", () => {
+  it("normalizes names into safe address suggestions", () => {
+    expect(aliasBase(" Café / Online Shopping! ")).toBe("cafe-online-shopping");
+    expect(aliasBase("!!!")).toBe("");
+  });
+  it("generates a three character alphanumeric suffix", () => {
+    for (let i = 0; i < 100; i++)
+      expect(aliasSuffix()).toMatch(/^[a-z0-9]{3}$/);
   });
 });

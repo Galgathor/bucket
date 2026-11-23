@@ -907,3 +907,90 @@ async fn sign_in_explains_imap_rejection_and_api_unavailability() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(value["error"].as_str().unwrap().contains("API connection"));
 }
+
+#[tokio::test]
+async fn alias_suffix_preferences_are_authenticated_and_user_scoped() {
+    let f = Fixture::new().await;
+    let alice = f.session("alice@example.com");
+    let bob = f.session("bob@example.com");
+    assert_eq!(
+        f.call(
+            "PUT",
+            "/api/preferences",
+            None,
+            Some(json!({"alias_suffix":false}))
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut bad = alice.clone();
+    bad.1 = "wrong".into();
+    assert_eq!(
+        f.call(
+            "PUT",
+            "/api/preferences",
+            Some(&bad),
+            Some(json!({"alias_suffix":false}))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        f.call(
+            "PUT",
+            "/api/preferences",
+            Some(&alice),
+            Some(json!({"alias_suffix":false,"email":"bob@example.com"}))
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        f.call(
+            "PUT",
+            "/api/preferences",
+            Some(&alice),
+            Some(json!({"alias_suffix":false}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        f.call("GET", "/api/me", Some(&alice), None).await.1["alias_suffix"],
+        false
+    );
+    assert_eq!(
+        f.call("GET", "/api/me", Some(&bob), None).await.1["alias_suffix"],
+        true
+    );
+}
+#[test]
+fn upgrades_existing_database_and_retains_alias_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("migration.db");
+    let path = path.to_str().unwrap();
+    let db = bucket::db::Db::open(path).unwrap();
+    db.save_user(&User {
+        email: "alice@example.com".into(),
+        enabled: true,
+        policy: None,
+    })
+    .unwrap();
+    db.with(|c| {
+        c.execute_batch("DROP TABLE preferences; PRAGMA user_version=1;")?;
+        Ok(())
+    })
+    .unwrap();
+    drop(db);
+    let db = bucket::db::Db::open(path).unwrap();
+    assert!(db.user("alice@example.com").unwrap().is_some());
+    assert!(db.alias_suffix("alice@example.com").unwrap());
+    db.save_alias_suffix("alice@example.com", false).unwrap();
+    drop(db);
+    let db = bucket::db::Db::open(path).unwrap();
+    assert!(!db.alias_suffix("alice@example.com").unwrap());
+}

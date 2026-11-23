@@ -1,25 +1,25 @@
 import { useState } from "react";
-import { AtSign, Mail, Shuffle, Copy, Eye, EyeOff, Check } from "lucide-react";
-import {
-  api,
-  generatePassword,
-  randomLocal,
-  type Address,
-  type Me,
-} from "./api";
+import { Shuffle, Copy, Eye, EyeOff, Check } from "lucide-react";
+import { api, generatePassword, type Address, type Me } from "./api";
 import { Modal, InfoButton, Busy, ErrorMessage } from "./components";
 
 type Props = {
   me: Me;
   address?: Address;
+  kind?: "mailbox" | "alias";
   onClose: () => void;
   onSaved: () => Promise<void>;
   notify: (s: string) => void;
 };
-export function AddressForm({ me, address, onClose, onSaved, notify }: Props) {
-  const [kind, setKind] = useState<"mailbox" | "alias">(
-    address?.kind ?? (me.policy.aliases ? "alias" : "mailbox"),
-  );
+export function AddressForm({
+  me,
+  address,
+  kind: initialKind = "mailbox",
+  onClose,
+  onSaved,
+  notify,
+}: Props) {
+  const kind = address?.kind ?? initialKind;
   const [local, setLocal] = useState("");
   const [domain, setDomain] = useState(me.domains[0] ?? "");
   const [name, setName] = useState(address?.name ?? "");
@@ -70,7 +70,7 @@ export function AddressForm({ me, address, onClose, onSaved, notify }: Props) {
   }
   return (
     <Modal
-      title={address ? "Edit address" : "Create address"}
+      title={address ? "Edit address" : "Create Mailbox"}
       description={address?.address}
       onClose={() => {
         if (!busy) {
@@ -83,54 +83,8 @@ export function AddressForm({ me, address, onClose, onSaved, notify }: Props) {
         <fieldset disabled={busy}>
           {!address && (
             <>
-              <div
-                className="kind-choice"
-                role="group"
-                aria-label="Address type"
-              >
-                {me.policy.aliases && (
-                  <button
-                    type="button"
-                    className={kind === "alias" ? "kind selected" : "kind"}
-                    onClick={() => {
-                      setKind("alias");
-                      setPassword("");
-                    }}
-                  >
-                    <AtSign size={21} />
-                    <span>
-                      <strong>Alias</strong>
-                      <small>Forwards to your inbox</small>
-                    </span>
-                    {kind === "alias" && <Check size={17} />}
-                  </button>
-                )}
-                {me.policy.mailboxes && (
-                  <button
-                    type="button"
-                    className={kind === "mailbox" ? "kind selected" : "kind"}
-                    onClick={() => setKind("mailbox")}
-                  >
-                    <Mail size={21} />
-                    <span>
-                      <strong>Mailbox</strong>
-                      <small>Its own inbox and password</small>
-                    </span>
-                    {kind === "mailbox" && <Check size={17} />}
-                  </button>
-                )}
-              </div>
               <div className="label-row">
                 <label htmlFor="local-part">Email address</label>
-                {kind === "alias" && (
-                  <button
-                    type="button"
-                    className="text-button"
-                    onClick={() => setLocal(randomLocal())}
-                  >
-                    <Shuffle size={14} /> Random address
-                  </button>
-                )}
               </div>
               <div className="address-input">
                 <input
@@ -285,7 +239,7 @@ export function AddressForm({ me, address, onClose, onSaved, notify }: Props) {
           </button>
           <button className="button primary" disabled={busy}>
             {busy ? <Busy /> : null}
-            {address ? "Save changes" : "Create address"}
+            {address ? "Save changes" : "Create Mailbox"}
           </button>
         </div>
       </form>

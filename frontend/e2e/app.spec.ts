@@ -16,6 +16,7 @@ async function setup(
   }: { admin?: boolean; signedIn?: boolean } = {},
 ) {
   let authenticated = signedIn;
+  let aliasSuffix = true;
   let config = { domains: ["example.com"], policy };
   let addresses = [
     {
@@ -58,6 +59,10 @@ async function setup(
       authenticated = false;
       return respond({ ok: true });
     }
+    if (path === "/api/preferences") {
+      aliasSuffix = body.alias_suffix;
+      return respond({ alias_suffix: aliasSuffix });
+    }
     if (path === "/api/me")
       return authenticated
         ? respond({
@@ -65,6 +70,7 @@ async function setup(
             admin,
             csrf: "test-csrf",
             configured: true,
+            alias_suffix: aliasSuffix,
             domains: config.domains,
             policy: config.policy,
             destinations: ["alex@example.com", "work@example.com"],
@@ -176,35 +182,76 @@ test("sign in, sign out and theme choice", async ({ page }) => {
     page.getByRole("heading", { name: "Sign in to Bucket" }),
   ).toBeVisible();
 });
-test("create an alias in a short form", async ({ page }) => {
+test("create an alias through name, address, forwarding and review", async ({
+  page,
+}) => {
   const requests = await setup(page);
+  await page.getByRole("button", { name: "Create Alias", exact: true }).click();
+  await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
+  await page.getByLabel("Name", { exact: true }).fill("Receipts");
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(page.getByLabel("Suggested alias")).toHaveText(
+    /^receipts-[a-z0-9]{3}@example.com$/,
+  );
+  await page.getByLabel("Add 3 random characters").uncheck();
+  await expect(page.getByLabel("Suggested alias")).toHaveText(
+    "receipts@example.com",
+  );
+  await page.getByRole("button", { name: "Next", exact: true }).click();
   await page
-    .getByRole("button", { name: "Create address", exact: true })
-    .click();
-  await expect(page.getByRole("dialog")).toBeVisible();
-  await page.getByLabel("Email address", { exact: true }).fill("receipts");
-  await page.getByLabel("Name Optional").fill("Receipts");
+    .getByRole("combobox", { name: "Forwards to", exact: true })
+    .selectOption("work@example.com");
   await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "Create address", exact: true })
+    .getByRole("button", { name: "Review Changes", exact: true })
     .click();
+  await expect(
+    page.getByRole("heading", { name: "Review changes", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("dialog").getByText("receipts@example.com", { exact: true }),
+  ).toBeVisible();
+  expect(
+    requests.some((r) => r.path === "/api/addresses" && r.body.local),
+  ).toBe(false);
+  await page.getByRole("button", { name: "Create", exact: true }).click();
   await expect(
     page.getByText("receipts@example.com", { exact: true }),
   ).toBeVisible();
   expect(
-    requests.find(
-      (r) => r.path === "/api/addresses" && r.body.local === "receipts",
-    )?.body.destination,
-  ).toBe("alex@example.com");
-  await expect(page.getByRole("dialog")).not.toBeVisible();
+    requests.find((r) => r.body.local === "receipts")?.body.destination,
+  ).toBe("work@example.com");
+  await page.getByRole("button", { name: "Create Alias", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Another");
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(page.getByLabel("Add 3 random characters")).not.toBeChecked();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+test("alias can be created directly and preserves its suffix while reviewing", async ({
+  page,
+}) => {
+  const requests = await setup(page);
+  await page.getByRole("button", { name: "Create Alias", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Online Shopping");
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  const suggested = await page.getByLabel("Suggested alias").innerText();
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Review Changes", exact: true })
+    .click();
+  await expect(
+    page.getByRole("dialog").getByText(suggested, { exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(page.getByText(suggested, { exact: true })).toBeVisible();
+  expect(requests.find((r) => r.body.kind === "alias")?.body.local).toMatch(
+    /^online-shopping-[a-z0-9]{3}$/,
+  );
 });
 test("generate a mailbox password and show storage", async ({ page }) => {
   const requests = await setup(page);
   await page
-    .getByRole("button", { name: "Create address", exact: true })
-    .click();
-  await page
-    .getByRole("button", { name: "Mailbox Its own inbox and password" })
+    .getByRole("button", { name: "Create Mailbox", exact: true })
     .click();
   await page.getByLabel("Email address", { exact: true }).fill("personal");
   await page.getByRole("button", { name: "Generate password" }).click();
@@ -213,7 +260,7 @@ test("generate a mailbox password and show storage", async ({ page }) => {
   );
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Create address", exact: true })
+    .getByRole("button", { name: "Create Mailbox", exact: true })
     .click();
   await expect(
     page.getByText("personal@example.com", { exact: true }),
@@ -342,10 +389,8 @@ test("layout fits the viewport and dialogs support keyboard dismissal", async ({
     path: info.outputPath("addresses.png"),
     fullPage: true,
   });
-  await page
-    .getByRole("button", { name: "Create address", exact: true })
-    .click();
-  await expect(page.getByLabel("Email address", { exact: true })).toBeFocused();
+  await page.getByRole("button", { name: "Create Alias", exact: true }).click();
+  await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).not.toBeVisible();
 });
@@ -374,8 +419,15 @@ test("accessible dashboard, forms, and dark theme", async ({ page }) => {
   await page.getByRole("button", { name: "Choose theme" }).click();
   await page.getByRole("menuitem", { name: "Dark", exact: true }).click();
   await check();
+  await page.getByRole("button", { name: "Create Alias", exact: true }).click();
+  await check();
+  await page.getByLabel("Name", { exact: true }).fill("Accessibility");
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await check();
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await check();
   await page
-    .getByRole("button", { name: "Create address", exact: true })
+    .getByRole("button", { name: "Review Changes", exact: true })
     .click();
   await check();
   await page.keyboard.press("Escape");

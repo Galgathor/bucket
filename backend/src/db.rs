@@ -23,7 +23,7 @@ impl Db {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return Err(Error::internal());
         }
         conn.execute_batch("BEGIN IMMEDIATE;
@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS resources(id INTEGER PRIMARY KEY,address TEXT NOT NUL
 CREATE INDEX IF NOT EXISTS resource_owner ON resources(owner);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,address TEXT NOT NULL,outcome TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS attempts(key TEXT PRIMARY KEY,count INTEGER NOT NULL,reset INTEGER NOT NULL);
-PRAGMA user_version=1; COMMIT;")?;
+CREATE TABLE IF NOT EXISTS preferences(email TEXT PRIMARY KEY,alias_suffix INTEGER NOT NULL DEFAULT 1 CHECK(alias_suffix IN (0,1)));
+PRAGMA user_version=2; COMMIT;")?;
         Ok(Self(Mutex::new(conn)))
     }
     pub fn with<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
@@ -43,6 +44,20 @@ PRAGMA user_version=1; COMMIT;")?;
             let mut guard = self.0.lock().map_err(|_| Error::internal())?;
             f(&mut guard)
         }
+    }
+    pub fn alias_suffix(&self, email: &str) -> Result<bool> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT alias_suffix FROM preferences WHERE email=?",
+                [email],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(true))
+        })
+    }
+    pub fn save_alias_suffix(&self, email: &str, value: bool) -> Result<()> {
+        self.with(|c|{c.execute("INSERT INTO preferences(email,alias_suffix) VALUES(?,?) ON CONFLICT(email) DO UPDATE SET alias_suffix=excluded.alias_suffix",params![email,value])?;Ok(())})
     }
     pub fn config(&self) -> Result<Configuration> {
         self.with(|c| {

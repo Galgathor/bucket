@@ -25,6 +25,7 @@ pub fn router(app: App) -> Router {
         .route("/login", post(login))
         .route("/logout", post(logout))
         .route("/me", get(me))
+        .route("/preferences", put(preferences))
         .route("/addresses", get(addresses).post(create))
         .route("/addresses/{id}", put(edit).delete(delete))
         .route("/admin/config", get(configuration).put(save_configuration))
@@ -336,8 +337,17 @@ async fn me(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>> {
     let (user, session) = authenticated(&app, &headers, false).await?;
     let config = app.db.config()?;
     Ok(Json(
-        json!({"email":user.email,"admin":user.email==app.config.admin,"csrf":session.csrf,"configured":!config.domains.is_empty(),"domains":config.domains,"policy":app.policy(&user)?,"destinations":app.destinations(&user.email).await?}),
+        json!({"email":user.email,"admin":user.email==app.config.admin,"csrf":session.csrf,"configured":!config.domains.is_empty(),"domains":config.domains,"policy":app.policy(&user)?,"destinations":app.destinations(&user.email).await?,"alias_suffix":app.db.alias_suffix(&user.email)?}),
     ))
+}
+async fn preferences(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<Preferences>,
+) -> Result<Json<Value>> {
+    let (user, _) = authenticated(&app, &headers, true).await?;
+    app.db.save_alias_suffix(&user.email, input.alias_suffix)?;
+    Ok(Json(json!({"alias_suffix":input.alias_suffix})))
 }
 async fn addresses(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>> {
     let (user, _) = authenticated(&app, &headers, false).await?;

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import {
-  Plus,
   Search,
   Copy,
   MoreHorizontal,
@@ -13,6 +12,7 @@ import {
   Inbox,
 } from "lucide-react";
 import { api, space, type Address, type Me } from "./api";
+import { AliasForm } from "./AliasForm";
 import { AddressForm, DeleteDialog } from "./AddressForm";
 import { InfoButton, ErrorMessage, Busy } from "./components";
 export function Dashboard({
@@ -31,7 +31,7 @@ export function Dashboard({
   const [filter, setFilter] = useState("all");
   const [status, setStatus] = useState("all");
   const [sort, setSort] = useState("newest");
-  const [create, setCreate] = useState(false);
+  const [create, setCreate] = useState<"mailbox" | "alias">();
   const [edit, setEdit] = useState<Address>();
   const [remove, setRemove] = useState<Address>();
   async function load() {
@@ -85,10 +85,13 @@ export function Dashboard({
       notify("Could not copy. Select the address to copy it.");
     }
   }
-  const allowed =
+  const mailboxAllowed =
     me.configured &&
-    ((me.policy.mailboxes && mailboxCount < me.policy.max_mailboxes) ||
-      (me.policy.aliases && aliasCount < me.policy.max_aliases));
+    me.policy.mailboxes &&
+    mailboxCount < me.policy.max_mailboxes;
+  const aliasAllowed =
+    me.configured && me.policy.aliases && aliasCount < me.policy.max_aliases;
+  const allowed = mailboxAllowed || aliasAllowed;
   return (
     <main className="main">
       <div className="page-heading">
@@ -96,14 +99,28 @@ export function Dashboard({
           <div className="eyebrow">Your account</div>
           <h1>Email addresses</h1>
         </div>
-        <button
-          className="button primary"
-          onClick={() => setCreate(true)}
-          disabled={!allowed || loading}
-        >
-          <Plus size={18} />
-          Create address
-        </button>
+        <div className="creation-actions">
+          {me.policy.mailboxes && (
+            <button
+              className="button secondary"
+              onClick={() => setCreate("mailbox")}
+              disabled={!mailboxAllowed || loading}
+            >
+              <Mail size={18} />
+              Create Mailbox
+            </button>
+          )}
+          {me.policy.aliases && (
+            <button
+              className="button primary"
+              onClick={() => setCreate("alias")}
+              disabled={!aliasAllowed || loading}
+            >
+              <AtSign size={18} />
+              Create Alias
+            </button>
+          )}
+        </div>
       </div>
       <div className="overview">
         <div>
@@ -228,8 +245,11 @@ export function Dashboard({
                 : "No addresses yet"}
             </h2>
             {!query && filter === "all" && status === "all" && allowed && (
-              <button className="text-button" onClick={() => setCreate(true)}>
-                Create an address
+              <button
+                className="text-button"
+                onClick={() => setCreate(aliasAllowed ? "alias" : "mailbox")}
+              >
+                {aliasAllowed ? "Create an alias" : "Create a mailbox"}
               </button>
             )}
           </div>
@@ -349,19 +369,21 @@ export function Dashboard({
             : ""}
         </div>
       </section>
-      {create && (
+      {create === "mailbox" && (
         <AddressForm
-          me={{
-            ...me,
-            policy: {
-              ...me.policy,
-              mailboxes:
-                me.policy.mailboxes && mailboxCount < me.policy.max_mailboxes,
-              aliases: me.policy.aliases && aliasCount < me.policy.max_aliases,
-            },
-          }}
-          onClose={() => setCreate(false)}
+          me={me}
+          kind="mailbox"
+          onClose={() => setCreate(undefined)}
           onSaved={saved}
+          notify={notify}
+        />
+      )}
+      {create === "alias" && (
+        <AliasForm
+          me={me}
+          onClose={() => setCreate(undefined)}
+          onSaved={saved}
+          onPreferenceSaved={refreshMe}
           notify={notify}
         />
       )}
